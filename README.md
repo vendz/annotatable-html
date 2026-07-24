@@ -10,6 +10,21 @@ Think Google Docs comments + Hypothesis highlights + Figma pins — but the repl
 
 ![status: works on macOS · Chromium browsers](https://img.shields.io/badge/status-macOS%20%C2%B7%20Chromium-blue)
 
+## Why this exists
+
+Reading a doc — especially an AI-generated spec or architecture write-up — constantly throws off questions: *why this choice? what does this term mean? is this still true?* Normally you either lose them, or you break flow to go ask somewhere else, and the question ends up detached from the exact spot that raised it. Static docs can't answer back, so you accumulate pages you only half-understand.
+
+This makes the doc itself the place you ask. Your question stays pinned to the precise text, diagram region, or element that prompted it, and Claude's answer lives right there — across sessions. The doc stops being a dead artifact and becomes something you can interrogate.
+
+## How it fits your workflow
+
+No new tool to learn — it rides the flow you already use with Claude Code:
+
+1. **Ask** Claude Code for a doc/spec/notes → it's generated as an annotatable page by default (this skill).
+2. **Read** it in your browser. A question hits → mark the exact spot (text / region / element) and type it. No context switch, no re-explaining what you were looking at.
+3. **Answer** — Claude replies on your subscription, either automatically via the local helper (double-click launcher) or by pasting the exported batch into any Claude chat.
+4. **Keep** — every Q&A persists in a plain file beside the doc, so it stays a living reference you can keep questioning over days.
+
 ## What you get
 
 Ask Claude for *"a spec / notes / architecture doc on X"* and you get an HTML page with an annotation layer baked in:

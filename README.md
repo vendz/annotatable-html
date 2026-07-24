@@ -1,41 +1,25 @@
 # annotatable-html
 
-A [Claude Code](https://claude.com/claude-code) skill that turns any doc/spec/notes you ask Claude to write into a **living, annotatable web page** — highlight text, box a diagram, or click an element, pin a question to it, and Claude answers it inline. No API key, no server, no SaaS. Runs entirely on your Claude Code subscription.
+Turn any doc Claude writes you into a page you can talk back to. Highlight a sentence, box a diagram, or click a component, ask your question right on the spot, and Claude answers it in the margin — pinned there for next time. No API key, no server, no accounts; it runs on the [Claude Code](https://claude.com/claude-code) subscription you already have.
 
-Think Google Docs comments + Hypothesis highlights + Figma pins — but the replies come from Claude, and everything lives in local files you own.
+![status: macOS · Chromium browsers](https://img.shields.io/badge/status-macOS%20%C2%B7%20Chromium-blue)
+
+You've hit this before: you ask Claude for a spec or an architecture write-up, get back a clean doc, and start reading — then the questions pile up. *Why base62 and not a UUID? What does "read-through cache" mean here? Is this number still right?* Today those questions go one of two places: into a separate chat where you re-paste the paragraph and re-explain what you meant, or nowhere at all. The doc can't answer, so it quietly becomes one more file you skimmed and never fully trusted.
+
+This keeps the question on the doc. You mark the exact spot that tripped you up, type what you want to know, and the answer lands right next to it — and it's still there tomorrow. A dead export turns into something you interrogate until you actually understand it.
 
 ![annotatable-html in action](docs/hero.png)
 
-*A generated architecture doc: a highlighted phrase, a dragged region box over the diagram, and an element pin on a node — each carries a threaded Q&A. Green ✓ pins are answered, amber pins are open. The sidebar shows Claude's answer rendered as markdown.*
+*A generated architecture doc: a highlighted phrase, a region box dragged over the diagram, and a pin on the "KV store" node — each holds its own Q&A thread. Green ✓ pins are answered, amber ones are still open; the sidebar shows Claude's answer as rendered markdown.*
 
-![status: works on macOS · Chromium browsers](https://img.shields.io/badge/status-macOS%20%C2%B7%20Chromium-blue)
+And it rides the flow you already use — there's no new app to open:
 
-## Why this exists
+1. **Ask** Claude Code for a doc, spec, or notes. It comes back as an annotatable page.
+2. **Read** it in your browser. When a question hits, mark the spot — a phrase, a slice of a diagram, or a whole element — and type it. No context switch, no re-explaining.
+3. **Answer.** Claude replies on your subscription: automatically through a local helper you start with one double-click, or by pasting a single self-contained block into any chat.
+4. **Keep.** Every question and answer is saved in a plain file beside the doc, so it grows into a reference you trust instead of a snapshot you forget.
 
-Reading a doc — especially an AI-generated spec or architecture write-up — constantly throws off questions: *why this choice? what does this term mean? is this still true?* Normally you either lose them, or you break flow to go ask somewhere else, and the question ends up detached from the exact spot that raised it. Static docs can't answer back, so you accumulate pages you only half-understand.
-
-This makes the doc itself the place you ask. Your question stays pinned to the precise text, diagram region, or element that prompted it, and Claude's answer lives right there — across sessions. The doc stops being a dead artifact and becomes something you can interrogate.
-
-## How it fits your workflow
-
-No new tool to learn — it rides the flow you already use with Claude Code:
-
-1. **Ask** Claude Code for a doc/spec/notes → it's generated as an annotatable page by default (this skill).
-2. **Read** it in your browser. A question hits → mark the exact spot (text / region / element) and type it. No context switch, no re-explaining what you were looking at.
-3. **Answer** — Claude replies on your subscription, either automatically via the local helper (double-click launcher) or by pasting the exported batch into any Claude chat.
-4. **Keep** — every Q&A persists in a plain file beside the doc, so it stays a living reference you can keep questioning over days.
-
-## What you get
-
-Ask Claude for *"a spec / notes / architecture doc on X"* and you get an HTML page with an annotation layer baked in:
-
-- **Three ways to mark anything** — select text, press **`R`** to drag a region box over a diagram/image, or press **`E`** to click a whole block.
-- **Ask questions pinned to the mark** — threads live inline in a sidebar, with filters (All / Unanswered / Answered) and amber→green ✓ pins.
-- **Answers render as markdown** — headings, bold, lists, code.
-- **Two answer paths, auto-picked:**
-  - **Copy-paste** (works anywhere, zero setup): a button exports a self-contained batch you paste into any Claude Code chat.
-  - **Auto-answer** (frictionless): double-click a launcher and questions get answered automatically via `claude -p` on your subscription — no clipboard, no reload.
-- **Everything is local.** Questions live in the browser (localStorage); answers live in a plain `<name>-threads.js` file next to the doc. Nothing leaves your machine.
+Everything stays on your machine: draft questions live in the browser, answers in a `<doc>-threads.js` file you own. Nothing is uploaded.
 
 ## Install
 

@@ -4,6 +4,10 @@ A [Claude Code](https://claude.com/claude-code) skill that turns any doc/spec/no
 
 Think Google Docs comments + Hypothesis highlights + Figma pins — but the replies come from Claude, and everything lives in local files you own.
 
+![annotatable-html in action](docs/hero.png)
+
+*A generated architecture doc: a highlighted phrase, a dragged region box over the diagram, and an element pin on a node — each carries a threaded Q&A. Green ✓ pins are answered, amber pins are open. The sidebar shows Claude's answer rendered as markdown.*
+
 ![status: works on macOS · Chromium browsers](https://img.shields.io/badge/status-macOS%20%C2%B7%20Chromium-blue)
 
 ## What you get

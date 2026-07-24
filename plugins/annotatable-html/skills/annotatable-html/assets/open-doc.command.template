@@ -1,0 +1,13 @@
+#!/bin/bash
+# Double-click this file to open the doc with live auto-answers (no terminal typing).
+# Rename to "Open <doc> (live).command" and replace __DOC__ below with your .html filename.
+# macOS: after copying, run `chmod +x "<this file>"` once so double-click works.
+# It just starts the local annotate bridge; close the window that opens to stop it.
+cd "$(dirname "$0")" || exit 1
+if ! command -v node >/dev/null 2>&1; then
+  echo "Node.js is required (one-time install): https://nodejs.org"
+  echo "Install it, then double-click this again."
+  read -n1 -s -r -p "Press any key to close."
+  exit 1
+fi
+exec node annotate-bridge.js "__DOC__"

@@ -1,0 +1,12 @@
+#!/bin/bash
+# Double-click to open your annotated docs with live auto-answers (no terminal typing).
+# Lives in the shared docs folder (e.g. ~/.claude/annotated-docs). Opens an index of all docs;
+# click any one to read/annotate it. Close the window that opens to stop the helper.
+cd "$(dirname "$0")" || exit 1
+if ! command -v node >/dev/null 2>&1; then
+  echo "Node.js is required (one-time install): https://nodejs.org"
+  echo "Install it, then double-click this again."
+  read -n1 -s -r -p "Press any key to close."
+  exit 1
+fi
+exec node annotate-bridge.js

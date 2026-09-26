@@ -7,7 +7,7 @@
       "name": "annotatable-html",
       "source": "./plugins/annotatable-html",
       "description": "Turn any doc/spec/notes into a living, annotatable web page — highlight text, box a diagram, or click an element, pin questions, and Claude answers them inline. No API key, no server.",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": { "name": "vendz", "url": "https://github.com/vendz" },
       "keywords": ["docs", "documentation", "annotations", "comments", "html", "spec", "review", "claude-code"]
     }

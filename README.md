@@ -1,6 +1,6 @@
 # annotatable-html
 
-Turn any doc Claude writes you into a page you can talk back to. Highlight a sentence, box a diagram, or click a component, ask your question right on the spot, and Claude answers it in the margin — pinned there for next time. No API key, no server, no accounts; it runs on the [Claude Code](https://claude.com/claude-code) subscription you already have.
+Turn any doc Claude writes you into a page you can talk back to. Highlight a sentence, box a diagram, or click a component, ask your question right on the spot, and the answer streams into the margin — pinned there for next time. Answers come from Claude or Codex, whichever you pick. No API key, no server, no accounts; it runs on the [Claude Code](https://claude.com/claude-code) subscription (or Codex login) you already have.
 
 ![status: macOS · Chromium browsers](https://img.shields.io/badge/status-macOS%20%C2%B7%20Chromium-blue)
 
@@ -14,9 +14,9 @@ This keeps the question on the doc. You mark the exact spot that tripped you up,
 
 And it rides the flow you already use — there's no new app to open:
 
-1. **Ask** Claude Code for a doc, spec, or notes. It comes back as an annotatable page.
+1. **Ask** Claude Code for a doc, spec, or notes, and say "make it annotatable" (or add it to any HTML page you already have).
 2. **Read** it in your browser. When a question hits, mark the spot — a phrase, a slice of a diagram, or a whole element — and type it. No context switch, no re-explaining.
-3. **Answer.** Claude replies on your subscription: automatically through a local helper you start with one double-click, or by pasting a single self-contained block into any chat.
+3. **Answer.** Answers arrive automatically through a local helper you start with one double-click — usually in 3–6 seconds, streaming in as they're written — or you paste one self-contained block into any chat. Pick the model from the toolbar: Claude (Fable, Opus, Sonnet, Haiku) or Codex (the models your Codex account offers).
 4. **Keep.** Every question and answer is saved in a plain file beside the doc, so it grows into a reference you trust instead of a snapshot you forget.
 
 Everything stays on your machine: draft questions live in the browser, answers in a `<doc>-threads.js` file you own. Nothing is uploaded.
@@ -28,7 +28,7 @@ Everything stays on your machine: draft questions live in the browser, answers i
 /plugin install annotatable-html@vendz
 ```
 
-That's it. From then on, when you ask Claude Code for documentation/specs/notes for your own reference, it builds them as annotatable pages by default.
+That's it. It's opt-in: ask Claude Code to "make this annotatable", "add comment threads" or "let me comment on it", for a new doc or any existing HTML page.
 
 ## Requirements
 
@@ -36,15 +36,18 @@ That's it. From then on, when you ask Claude Code for documentation/specs/notes 
 - **A Chromium browser** (Chrome/Edge/Arc/Brave) for the auto-answer launcher; any browser works for the copy-paste path.
 - **Node.js** — only for the optional auto-answer helper (`annotate-bridge.js`). The page itself needs nothing.
 - The auto-answer helper uses `claude -p` on your **subscription** (no API key). It unsets `ANTHROPIC_API_KEY` for the child so it never bills the API.
+- **Codex CLI** (optional) — logged in, if you want Codex answers. The toolbar greys out whichever side isn't installed or logged in.
 
 ## How it works
 
-1. Claude writes `<name>.html` (with the self-mounting `annotate.js` engine) into a shared folder, `~/.claude/annotated-docs/`, plus a `<name>-threads.js` answers file.
-2. You annotate in the browser; questions are saved locally.
-3. **Answers:** either paste the exported batch into any Claude chat, *or* run the tiny local bridge (double-click launcher) which serves the folder and runs `claude -p` to write answers back — the page updates itself.
-4. Reload (or it live-updates): pins turn green, answers appear inline.
+1. Claude writes `<name>.html` (with the self-mounting `annotate.js` engine) into a shared folder, `~/annotated-docs/`, plus a `<name>-threads.js` answers file.
+2. You annotate in the browser. Questions and half-typed drafts are saved locally.
+3. **Answers:** either paste the exported batch into any Claude chat, *or* run the tiny local bridge (double-click launcher). The bridge serves the folder, asks Claude (`claude -p`) or Codex (`codex exec`), streams the answer to the page, and saves it into the answers file itself.
+4. Pins turn green and answers appear inline, labelled with the model that wrote them.
 
-The engine self-mounts (injects its own toolbar + sidebar, all CSS classes prefixed `az-` so it never clashes with your page) and re-locates marks across reloads by text phrase, region fractions, or element selector.
+Answers are written in plain English: short, direct, no jargon, and no file or function names unless you ask. The bridge warms up each doc when you turn on Annotate, keeps one session per thread so follow-ups stay fast, and can be linked to a project folder so answers check the real code.
+
+The engine self-mounts its own toolbar and sidebar inside a shadow root, so your page's CSS can't restyle it and it can't restyle your page. It re-locates marks across reloads by text phrase (with surrounding text, so repeated phrases land in the right place), region fractions, or element selector.
 
 ## Manual install (without the plugin system)
 

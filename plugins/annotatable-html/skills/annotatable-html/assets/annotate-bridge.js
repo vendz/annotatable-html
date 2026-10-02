@@ -16,6 +16,10 @@
  *         If the bridge isn't running, the page silently falls back to the
  *         self-contained "Copy questions for Claude" button.
  *
+ * LINK:   node annotate-bridge.js --link <path/to/doc.html> <source-folder>
+ *         Links a doc to the folder it was built from, so answers can check it. Works whether
+ *         or not a bridge is running; prints the result and exits non-zero on failure.
+ *
  * Auth note: uses whatever `claude` / `codex` is logged into. If ANTHROPIC_API_KEY is set in
  * your environment `claude` would use the API instead of the subscription, so this script
  * unsets it for the child process.
@@ -27,6 +31,10 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn, spawnSync, execFileSync } = require('child_process');
 
+const expandHome = p => p.replace(/^~(?=$|\/)/, os.homedir());
+// `--link <doc> <dir>`: a doc given as a path sets the folder to work in, so no `cd` is needed.
+const LINK = (() => { const i = process.argv.indexOf('--link'); return i < 0 ? null : { doc: process.argv[i + 1], dir: process.argv[i + 2] }; })();
+if (LINK && LINK.doc && /[\\/]/.test(LINK.doc)) { try { process.chdir(path.dirname(path.resolve(expandHome(LINK.doc)))); } catch (e) {} }
 const ROOT = process.cwd();
 const PREFERRED = Number(process.env.ANNOT_PORT || (process.argv.find(a => /^\d+$/.test(a))) || 4317);
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif', '.woff2': 'font/woff2' };
@@ -205,12 +213,13 @@ const docExists = base => fs.existsSync(path.join(ROOT, base + '.html')) || fs.e
 // Git identity of a directory, if it's inside a git repo (worktree or main checkout) — used to
 // relocate a moved/renamed worktree later. Returns null for a non-git (or no-longer-git) dir.
 function detectGit(dir) {
+  const quiet = { timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] };   // a non-repo is normal, not an error to print
   try {
-    const commonDirRaw = execFileSync('git', ['-C', dir, 'rev-parse', '--git-common-dir'], { timeout: 2000, encoding: 'utf8' }).trim();
+    const commonDirRaw = execFileSync('git', ['-C', dir, 'rev-parse', '--git-common-dir'], quiet).trim();
     const commonDir = path.resolve(dir, commonDirRaw);
     let branch = null;
-    try { branch = execFileSync('git', ['-C', dir, 'symbolic-ref', '--short', '-q', 'HEAD'], { timeout: 2000, encoding: 'utf8' }).trim() || null; } catch (e) {}
-    const headSha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { timeout: 2000, encoding: 'utf8' }).trim();
+    try { branch = execFileSync('git', ['-C', dir, 'symbolic-ref', '--short', '-q', 'HEAD'], quiet).trim() || null; } catch (e) {}
+    const headSha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], quiet).trim();
     return { commonDir, branch, headSha };
   } catch (e) { return null; }
 }
@@ -249,6 +258,16 @@ function resolveProjectDir(base) {
   console.log(`⚠ ${base}: linked project "${p.dir}" is missing and could not be relocated`);
   return { dir: null, stale: true, lastKnownDir: p.dir };
 }
+// Shared by the 🔗 button (POST /__annot/set-project) and `--link` on the command line.
+function linkProject(base, dir) {
+  const abs = path.resolve(expandHome(dir.trim()));
+  if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) throw new Error('not a directory: ' + abs);
+  const git = detectGit(abs);
+  writeJSON(sidecarPath(base, 'project'), { dir: abs, git, linkedAt: Date.now() });
+  // Grounding changed — drop primed base sessions so the next question re-primes.
+  const s = loadSessions(base); s.bases = {}; saveSessions(base, s);
+  return { dir: abs, git };
+}
 
 /* ---------------------------------- prompts ---------------------------------- */
 const STYLE_RULES = [
@@ -262,7 +281,7 @@ function buildBasePrompt(base, projectDir) {
   const doc = base + '.html';
   return [
     `You are the standing Q&A assistant for the annotated doc "${doc}" in the folder ${ROOT}.`,
-    projectDir ? `That doc documents the project at "${projectDir}" — skim its structure and key entry points (README, top-level source folders) to orient yourself, but do not paste file contents back.` : null,
+    projectDir ? `That doc was built from the folder "${projectDir}". Orient yourself there: first read its own instruction and status files if they exist (CLAUDE.md, AGENTS.md, STATUS.md, README), then skim its top-level layout. Do not paste file contents back.` : null,
     `Read "${doc}" now to orient yourself on its content and structure.`,
     `Reply with one short line ("Ready.") once oriented — no summary. Readers will ask questions about this doc in later turns, each in its own thread. Re-read any file whenever you need exact specifics instead of relying on memory.`,
     STYLE_RULES,
@@ -273,6 +292,11 @@ function buildThreadPrompt(base, item, opts) {
   const parts = [];
   if (opts.followup) parts.push(`Follow-up in the same thread about "${base}.html":`);
   else parts.push(`A reader asked about this part of "${base}.html": ${JSON.stringify(item.label)}` + (item.anchor && item.anchor.type ? ` (a ${item.anchor.type} they marked).` : '.'));
+  if (opts.primed === false) parts.push(`The doc is "${path.join(ROOT, base + '.html')}" — read it before answering.`);
+  // Named on every turn: a resumed thread may predate a relink, and the standalone path has no prime.
+  parts.push(opts.projectDir
+    ? `The doc was built from the folder "${opts.projectDir}". When the doc alone does not settle the question, check that folder.`
+    : 'No source folder is linked to this doc. Answer from the doc; if it does not cover something, say so instead of guessing.');
   if (opts.history && opts.history.length) {
     parts.push('Earlier in this thread:\n' + opts.history.map(m => (m.role === 'user' ? 'Reader: ' : 'You: ') + m.text).join('\n'));
   }
@@ -392,14 +416,14 @@ async function answerThread(base, item, choice, emit) {
 
   let r = null, sessionId = null;
   if (own && own.backend === choice.backend) {
-    r = await runModel(choice, { prompt: buildThreadPrompt(base, item, { followup: true, primed: true }), resumeId: own.id, addDirs, onDelta, onReset });
+    r = await runModel(choice, { prompt: buildThreadPrompt(base, item, { followup: true, primed: true, projectDir: proj.dir }), resumeId: own.id, addDirs, onDelta, onReset });
     if (r.ok) sessionId = r.sessionId || own.id;
     else { console.log(`↻ resume failed for ${base}#${item.id} (${r.error}) — starting a fresh thread session`); onReset(); }
   }
   if (!r || !r.ok) {
     // New thread, a backend switch, or a dead session: fork the doc's primed base session and
     // replay the thread's history so nothing is lost.
-    const prompt = opts => buildThreadPrompt(base, item, Object.assign({ followup: history.length > 0, history }, opts));
+    const prompt = opts => buildThreadPrompt(base, item, Object.assign({ followup: history.length > 0, history, projectDir: proj.dir }, opts));
     let baseId = await ensureBase(base, choice);
     if (baseId) {
       const tid = choice.backend === 'claude' ? crypto.randomUUID() : undefined;
@@ -498,16 +522,11 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && url === '/__annot/set-project') {
     return readBody(req, 1e4, j => {
       if (!j || !safeBase(j.base) || typeof j.dir !== 'string' || !j.dir.trim()) return sendJSON(res, 400, { ok: false, error: 'bad request' });
-      const abs = path.resolve(j.dir.trim().replace(/^~(?=$|\/)/, os.homedir()));
-      if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) return sendJSON(res, 400, { ok: false, error: 'not a directory: ' + abs });
       withQueue('doc:' + j.base, () => {
-        const git = detectGit(abs);
-        writeJSON(sidecarPath(j.base, 'project'), { dir: abs, git, linkedAt: Date.now() });
-        // Grounding changed — drop primed base sessions so the next question re-primes.
-        const s = loadSessions(j.base); s.bases = {}; saveSessions(j.base, s);
-        console.log(`✓ ${j.base} now grounded in ${abs}` + (git ? ` (branch ${git.branch || '(detached)'})` : ''));
-        return { ok: true, dir: abs };
-      }).then(r => sendJSON(res, 200, r), e => sendJSON(res, 500, { ok: false, error: e.message }));
+        const { dir, git } = linkProject(j.base, j.dir);
+        console.log(`✓ ${j.base} now grounded in ${dir}` + (git ? ` (branch ${git.branch || '(detached)'})` : ''));
+        return { ok: true, dir };
+      }).then(r => sendJSON(res, 200, r), e => sendJSON(res, /^not a directory/.test(e.message) ? 400 : 500, { ok: false, error: e.message }));
     });
   }
 
@@ -630,7 +649,20 @@ function onListen(port) {
   console.log(`  Close this window to stop.\n`);
   openBrowser(link);
 }
-findPort(PREFERRED, sel => {
+function runLinkCommand() {
+  const base = LINK.doc ? path.basename(LINK.doc).replace(/\.html?$/i, '') : '';
+  const fail = msg => { console.error(`✗ link failed: ${msg}\n  usage: node annotate-bridge.js --link <path/to/doc.html> <source-folder>`); process.exit(1); };
+  if (!LINK.doc || !LINK.dir || !LINK.dir.trim()) fail('missing doc or folder');
+  if (!safeBase(base)) fail(`bad doc name "${base}"`);
+  if (!docExists(base)) fail(`no doc "${base}.html" in ${ROOT}`);
+  try {
+    const { dir, git } = linkProject(base, LINK.dir);
+    console.log(`✓ linked ${base} → ${dir}` + (git ? ` (git, branch ${git.branch || '(detached)'})` : ' (not a git repo)'));
+    process.exit(0);
+  } catch (e) { fail(e.message); }
+}
+if (LINK) runLinkCommand();
+else findPort(PREFERRED, sel => {
   if (sel.ours) { console.log(`Bridge already running on ${sel.n} — opening…`); openBrowser(urlFor(sel.n, argDoc() || '')); process.exit(0); }
   server.listen(sel.n, '127.0.0.1', () => onListen(sel.n));
 });

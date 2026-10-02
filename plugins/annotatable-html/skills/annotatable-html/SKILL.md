@@ -32,7 +32,7 @@ An opt-in addon that makes an HTML page **annotatable**: the user selects text, 
 - Two answer paths, auto-picked: **Copy button** (works everywhere) or **auto-answer bridge** (`⚡ live`, zero copy-paste).
 - Answers follow a fixed style: plain English, concise, no jargon, no file/function names unless the reader asks. The rules live in the bridge's answer prompt and in the Copy batch text.
 - Assets live in this skill's `assets/`: `annotate.js` (self-mounting engine, classes prefixed `az-`), `annotate-bridge.js` (Node helper), `threads.template.js`, `open-docs.command.template` (shared launcher), `open-doc.command.template` (per-doc launcher).
-- The bridge answers via persistent Claude Code sessions, not a fresh cold start per question — see "Grounding + session continuity" below. If a doc documents a real project, set that project's directory once (via the 🔗 button on the docs index, or write `<name>.project.json` yourself) so answers can check the actual code.
+- The bridge answers via persistent Claude Code sessions, not a fresh cold start per question — see "How the bridge answers" below. If files on disk fed the doc, link that folder once (step 3's `--link` command, or the 🔗 button on the docs index) so answers can check the real source.
 
 ## How to implement (shared-folder model — the default)
 
@@ -56,15 +56,15 @@ All annotated docs live in **one shared home: `~/annotated-docs/`**. The engine 
      ```
    - `<name>-threads.js` — copy `assets/threads.template.js` to this name. Only the `window.ANNOTATE_THREADS = {}` line matters; keeping or trimming the header comment is fine.
    The bridge auto-lists every `<name>.html` on its index; no per-doc launcher needed.
-3. **Ground it now, in this same step, if it documents a real project/codebase — do not defer this.** This is the single most-skipped step: it's easy to write the HTML and move on, and a doc that documents real code but was never grounded silently answers from prose alone with no error, so the gap goes unnoticed until a reader hits a question it can't actually check. Decide right now, while you still have the answer at hand:
-   - **You're writing this doc from inside the project it documents** (the common case — you were just reading/editing that code to write the doc): ground it immediately, using your own cwd/repo root, no need to ask the user:
+3. **Link the doc to the folder it was built from — now, in this same step.** This is the most-skipped step, and skipping it is silent: an unlinked doc answers from its own text only, so questions the text doesn't cover get "the doc doesn't say". (In Sep 2026, 13 of the 15 newest docs were unlinked, including lecture notes and lab writeups made inside course folders.)
+   - **Link whenever files on disk fed the doc:** a codebase, course slides or notebooks, an assignment, a writeup's working folder, notes, a scratch folder holding the chat's inputs. Use the folder you were working in (the repo root inside a git repo). No need to ask the user.
      ```bash
-     curl -s -X POST http://127.0.0.1:4317/__annot/set-project -H 'Content-Type: application/json' \
-       -d "{\"base\":\"<name>\",\"dir\":\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"}"
+     node ~/annotated-docs/annotate-bridge.js --link ~/annotated-docs/<name>.html \
+       "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
      ```
-     (equivalent to clicking 🔗 on the doc's index card.)
-   - **You don't have a project checked out in this session** (e.g. you're working directly in `~/annotated-docs` with no other repo open) but the doc clearly describes one: ask the user for the path before finishing, rather than silently leaving it ungrounded — a doc about real code with no link is not a valid finished state.
-   - **The doc is genuinely self-contained** (a from-scratch design doc, a concept explainer, research notes) — skip grounding, nothing to link.
+     It works whether or not the bridge is running. It prints `✓ linked …` or `✗ link failed: …` and exits non-zero on failure — read the output. (Same effect as clicking 🔗 on the doc's index card.)
+   - **The doc describes a project you don't have open** (e.g. you're working directly in `~/annotated-docs`): ask the user for the path before finishing.
+   - **Skip only when nothing on disk fed the doc** — it came purely from the chat or your own knowledge. A topic that sounds self-contained (notes, explainer, quiz prep) is not a reason to skip if its source files sit in your working folder.
 4. **Anchoring is automatic:** text/region work inside the content scope (auto-detects `main`, `article`, `.wrap`, else `<body>` — keep diagrams inside it); element clicks work on `p, h1–h5, li, pre, blockquote, img, figure, table, .node, .card, .step, .box, [data-annot]`. Override via `window.ANNOTATE_CONFIG = { contentSelector, elementSelector, threadsVar }` before `annotate.js`.
 5. **Launch it live (default):** run `node annotate-bridge.js "<name>.html"` inside `~/annotated-docs/` so it opens ready. Tell the user: **next time double-click `Open annotated docs (live).command`** → index of all docs → click one. Auto-answers use the user's Claude Code subscription via `claude -p` or their Codex login via `codex exec` (no API key; the CLI must be on PATH and logged in; the bridge unsets `ANTHROPIC_API_KEY` for the child). After changing `annotate-bridge.js`, restart the running bridge (it is a long-lived process).
 6. **Tell the user the loop:** Annotate → select / `R` / `E` → type → answer appears automatically (`⚡ live`). Opening the raw `file://` (no launcher) shows a hint and falls back to the **📋 Copy questions for Claude** button (paste into any chat → Claude writes the threads file → reload).
@@ -76,13 +76,14 @@ All annotated docs live in **one shared home: `~/annotated-docs/`**. The engine 
 The model only **writes the answer text**; the bridge streams it to the page and then writes it into `<name>-threads.js` itself. (Older versions made the model read and edit the threads file, which took 12-18s per answer and grew with the file; now an answer takes ~3-4s, first words in ~2s.)
 
 Per doc the bridge keeps `<name>.sessions.json` (bridge-internal, don't hand-edit): `{ v:2, bases:{ claude, codex }, threads:{ <id>:{ backend, id } } }`. An older `{ base, threads:{ <id>:<sessionId> } }` file is read as Claude sessions.
-- **A base session per backend**, primed once per doc by reading `<name>.html` (and skimming the linked project). The page asks for this (`POST /__annot/prime`) when Annotate is turned on, so the first question doesn't wait for it.
+- **A base session per backend**, primed once per doc by reading `<name>.html` and, if linked, the folder's own CLAUDE.md / AGENTS.md / STATUS.md / README plus its top-level layout. (Answers run from the docs folder, so neither CLI loads the project's instruction files by itself.) The page asks for this (`POST /__annot/prime`) when Annotate is turned on, so the first question doesn't wait for it.
 - **One session per thread.** A new thread forks the base; a follow-up resumes the thread's own session and sends only the new question.
+- **Every question names the linked folder's current path** (or says none is linked, so the model says "the doc doesn't cover that" instead of guessing). A thread session started before a relink still looks in the right place.
 - **Switching backend mid-thread** forks the other backend's base and replays the thread history in the prompt.
 - A stale session id self-heals: dropped, then re-forked/re-primed.
 - Codex runs `codex exec --json --ignore-user-config --ignore-rules --skip-git-repo-check` with a read-only sandbox (skipping the user's MCP/plugins cuts startup from ~8.5s to ~3s). Claude runs `claude -p --safe-mode --tools Read,Glob,Grep --output-format stream-json`.
 
-- `<name>.project.json` = `{ dir, git:{commonDir,branch,headSha}|null, linkedAt }` — set via the 🔗 button or the curl above. Changing it drops the cached base sessions so the next question re-primes.
+- `<name>.project.json` = `{ dir, git:{commonDir,branch,headSha}|null, linkedAt }` — set via `--link`, the 🔗 button, or `POST /__annot/set-project {base, dir}`. Changing it drops the cached base sessions so the next question re-primes.
 - Deleting a doc (🗑) also removes its `.sessions.json` and `.project.json`.
 
 **Worktree-aware linking.** `set-project` stores git identity (shared `.git` dir + branch) with the path. A moved/renamed worktree is found again via `git worktree list` and relinked silently ("(auto-relinked)" on the index card). A removed worktree or deleted repo is not relinked: the answer comes back with a `warning` the page toasts, and the index card shows "⚠ moved/missing — click 🔗 to relink".
@@ -129,7 +130,8 @@ window.ANNOTATE_THREADS = {
 - **Styling the sidebar from the host page** → it is in a shadow root on purpose. Change `UI_STYLE` inside `annotate.js` instead, and set fonts explicitly (a `font:` shorthand with `inherit` as the family is invalid and silently dropped).
 - **Forgetting `chmod +x`** on the launcher → double-click won't run it.
 - **Dropping `--safe-mode`** from the bridge's `claude -p` calls → every answer reloads the full skill/MCP/hook set (the same weight as an interactive session), turning a few-second answer back into a 1-2 minute one.
-- **Forgetting to set `<name>.project.json`** for a doc about a real codebase → answers are grounded only in the doc's own prose, not the actual code. This has actually happened (a doc about a real backend went un-grounded for its whole life, and the only sign was Claude honestly saying "I don't have a checkout of this repo" when asked something the prose didn't cover) — it's silent otherwise, so treat grounding as step 3 of doc creation, not a follow-up.
+- **Not linking a doc whose source files are on disk** → answers come from the doc's own text only, with no error. It has happened to most docs: a real backend doc, and lecture notes and lab writeups made inside course folders that were wrongly treated as "self-contained". Treat linking as step 3 of doc creation, not a follow-up.
+- **Linking with the old `curl … /__annot/set-project` before the bridge is up** → `curl -s` fails silently and nothing is linked. Use `--link`, which needs no running bridge and reports failure.
 - **Editing `<name>.sessions.json` by hand** → don't; it's bridge bookkeeping (session ids), not reader-facing. If it's ever wrong, delete it — the bridge re-primes and re-forks automatically.
 - **Naming any local variable `CSS` inside `annotate.js`'s IIFE** → `selectorFor()` calls `CSS.escape(el.id)` expecting the global `window.CSS`; a local `const CSS` (the stylesheet string used to be named this) silently shadows it, so element-mode clicks on anything with an `id` attribute throw inside the click handler and create no thread, with no visible error. The stylesheet string is named `STYLE` for this reason — keep it that way.
 

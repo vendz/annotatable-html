@@ -29,7 +29,8 @@
   const content = (CFG.contentSelector && document.querySelector(CFG.contentSelector))
     || document.querySelector('main,article,.wrap') || document.body;
   const HTML = document.documentElement;
-  const RAIL_W = 380;
+  // Rail width: drag its left edge to resize (double-click resets). Shared by all docs.
+  const RAIL_W = 380, RAIL_MIN = 300, RAILWKEY = 'annot::railw';
 
   const KEY = 'annot::' + location.pathname;
   const DELKEY = KEY + '::del', DRAFTKEY = KEY + '::drafts', CHOICEKEY = 'annot::model';
@@ -93,7 +94,7 @@
   .az-el-mark.az-focus{outline-color:#7c9cff!important}
   html.az-element-mode .az-el-hover{outline:2px dashed #7c9cff!important;outline-offset:3px!important;cursor:pointer!important}
   html.az-region-mode,html.az-region-mode *{cursor:crosshair!important;user-select:none!important;-webkit-user-select:none!important}
-  html.az-railopen{padding-right:${RAIL_W}px!important}
+  html.az-railopen{padding-right:var(--az-rail-w,${RAIL_W}px)!important}
   @media (max-width:760px){html.az-railopen{padding-right:0!important}}
   `;
   const pageStyle = document.createElement('style'); pageStyle.textContent = PAGE_STYLE; document.head.appendChild(pageStyle);
@@ -123,7 +124,7 @@
     background:#161a21;border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:3px;box-shadow:0 4px 14px rgba(0,0,0,.28);opacity:.7;transition:right .2s ease,opacity .15s}
   .dock:hover,.ui.on .dock{opacity:1}
   .ui.on .dock{border-radius:12px;padding:4px}
-  .ui.railopen .dock{right:${RAIL_W + 16}px}
+  .ui.railopen .dock{right:calc(var(--az-rail-w,${RAIL_W}px) + 16px)}
   @media (max-width:760px){.ui.railopen .dock{display:none}}
   .master{width:30px;height:30px;display:flex;align-items:center;justify-content:center;font-size:15px;background:transparent;border:none;border-radius:999px;padding:0}
   .master:hover{background:#12161d}
@@ -162,7 +163,7 @@
 
   .menu{position:fixed;bottom:60px;right:16px;z-index:2147483002;width:300px;max-height:70vh;overflow:auto;display:none;
     background:#161a21;border:1px solid #252b36;border-radius:12px;padding:6px;box-shadow:0 14px 40px rgba(0,0,0,.5)}
-  .ui.railopen .menu{right:${RAIL_W + 16}px}
+  .ui.railopen .menu{right:calc(var(--az-rail-w,${RAIL_W}px) + 16px)}
   .menu.show{display:block}
   .menu h5{margin:8px 8px 4px;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;color:#9aa3b2;display:flex;gap:6px;align-items:center}
   .menu h5 small{font-weight:500;text-transform:none;letter-spacing:0;color:#6d7583}
@@ -182,9 +183,15 @@
   .adder button:hover{background:#7c9cff;color:#0b1020}
   .adder button+button{border-left:1px solid #252b36}
 
-  .rail{position:fixed;top:0;right:0;height:100vh;width:${RAIL_W}px;max-width:100vw;background:#161a21;border-left:1px solid #252b36;
+  .rail{position:fixed;top:0;right:0;height:100vh;width:var(--az-rail-w,${RAIL_W}px);max-width:100vw;background:#161a21;border-left:1px solid #252b36;
     transform:translateX(100%);transition:transform .2s ease;z-index:2147483000;display:flex;flex-direction:column}
   .ui.railopen .rail{transform:none}
+  .rail.sizing{transition:none}
+  .grip{position:absolute;top:0;left:-4px;width:8px;height:100%;cursor:col-resize;z-index:2;touch-action:none}
+  .grip::after{content:"";position:absolute;top:0;bottom:0;left:3px;width:2px;background:transparent;transition:background .15s .1s}
+  .grip:hover::after,.grip:focus-visible::after,.rail.sizing .grip::after{background:#7c9cff}
+  .grip:focus{outline:none}
+  @media (max-width:760px){.grip{display:none}}
   @media (max-width:760px){.rail{width:100vw}}
   .rail header{flex:none;padding:14px 16px;border-bottom:1px solid #252b36;display:flex;align-items:center;gap:8px;background:transparent}
   .rail header b{font-size:14px;font-weight:650}
@@ -271,7 +278,7 @@
 
   .toast{position:fixed;top:16px;left:50%;transform:translate(-50%,-6px);background:#e7e9ee;color:#0f1115;font-weight:600;font-size:12.5px;
     padding:9px 15px;border-radius:10px;opacity:0;transition:opacity .18s,transform .18s;pointer-events:none;z-index:2147483003;max-width:80vw}
-  .ui.railopen .toast{left:calc((100vw - ${RAIL_W}px) / 2)}
+  .ui.railopen .toast{left:calc((100vw - var(--az-rail-w,${RAIL_W}px)) / 2)}
   .toast.show{opacity:1;transform:translate(-50%,0)}
   .pastebox{position:fixed;top:20%;left:10%;width:80%;height:50%;z-index:2147483003;background:#0f1319;color:#e7e9ee;border:1px solid #7c9cff;border-radius:10px;padding:10px;font:12px ${MONO}}
   @media (prefers-reduced-motion:reduce){.rail,.adder,.chip,.card,.toast,.tool,.dock{transition:none}.skline{animation:none}}
@@ -284,6 +291,7 @@
   <div class="layer" id="layer"><div class="band" id="band"></div></div>
   <div class="ui" id="ui">
     <aside class="rail" id="rail">
+      <div class="grip" id="grip" role="separator" aria-orientation="vertical" aria-label="Resize threads panel" tabindex="0" title="Drag to resize · double-click to reset"></div>
       <header><b><span class="ic">💬</span>Threads</b><span class="live">· ⚡ live</span><button class="x" id="closeRail" title="Close">✕</button></header>
       <div class="filters">
         <button class="chip on" data-filter="all">All<span class="n" id="cAll">0</span></button>
@@ -556,7 +564,7 @@
   function layoutPins() {
     const lr = layer.getBoundingClientRect(), cr = content.getBoundingClientRect();
     const railOpen = ui.classList.contains('railopen');
-    const limit = innerWidth - (railOpen && innerWidth > 760 ? RAIL_W : 0);
+    const limit = innerWidth - (railOpen && innerWidth > 760 ? railW : 0);
     const inGutter = cr.right + 34 <= limit;
     const rects = {};
     order = Object.keys(threads).map(id => { const r = markRect(id); rects[id] = r; return { id, y: r ? r.top : 1e9 }; }).sort((a, b) => a.y - b.y).map(o => o.id);
@@ -721,6 +729,15 @@
     });
   }
   function scrollToMark(id) { const r = markRect(id); if (!r) return; window.scrollTo({ top: Math.max(0, window.scrollY + r.top - 160), behavior: 'smooth' }); }
+  // Keeps at least 320px of page next to the rail.
+  let railW = RAIL_W;
+  const clampRailW = w => Math.round(Math.max(RAIL_MIN, Math.min(w, Math.max(RAIL_MIN, innerWidth - 320))));
+  function applyRailW(w, save) {
+    railW = clampRailW(w); HTML.style.setProperty('--az-rail-w', railW + 'px');
+    const g = $('grip'); g.setAttribute('aria-valuenow', railW); g.setAttribute('aria-valuemin', RAIL_MIN); g.setAttribute('aria-valuemax', clampRailW(1e9));
+    if (save) writeLS(RAILWKEY, railW);
+    scheduleLayout();
+  }
   function setRail(open) {
     ui.classList.toggle('railopen', open); HTML.classList.toggle('az-railopen', open);
     scheduleLayout();
@@ -882,6 +899,26 @@
   $('offBtn').onclick = () => setAnnot(false);
   $('dockThreads').onclick = () => { setRail(!ui.classList.contains('railopen')); renderRail(); };
   $('closeRail').onclick = () => setRail(false);
+  {
+    const grip = $('grip'), rail = $('rail'); let raf = 0;
+    grip.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return; e.preventDefault(); grip.setPointerCapture(e.pointerId); rail.classList.add('sizing');
+      HTML.style.setProperty('cursor', 'col-resize', 'important'); HTML.style.setProperty('user-select', 'none', 'important');
+      const move = ev => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => applyRailW(innerWidth - ev.clientX, false)); };
+      const up = () => {
+        cancelAnimationFrame(raf); grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); grip.removeEventListener('pointercancel', up);
+        rail.classList.remove('sizing'); HTML.style.removeProperty('cursor'); HTML.style.removeProperty('user-select'); writeLS(RAILWKEY, railW);
+      };
+      grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up); grip.addEventListener('pointercancel', up);
+    });
+    grip.addEventListener('dblclick', () => applyRailW(RAIL_W, true));
+    grip.addEventListener('keydown', e => {
+      const d = e.key === 'ArrowLeft' ? 24 : e.key === 'ArrowRight' ? -24 : 0;
+      if (d) { e.preventDefault(); e.stopPropagation(); applyRailW(railW + d, true); }
+    });
+    applyRailW(Number(readLS(RAILWKEY, RAIL_W)) || RAIL_W, false);
+    window.addEventListener('resize', () => applyRailW(Number(readLS(RAILWKEY, RAIL_W)) || RAIL_W, false));
+  }
   root.querySelectorAll('.chip').forEach(c => c.onclick = () => { filter = c.dataset.filter; root.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === c)); renderRail(); });
   $('copyBtn').onclick = () => {
     const batch = Object.entries(threads).filter(([id, t]) => t.messages.some(m => m.role === 'user'))

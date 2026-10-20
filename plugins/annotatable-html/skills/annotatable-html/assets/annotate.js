@@ -184,9 +184,20 @@
   .adder button+button{border-left:1px solid #252b36}
 
   .rail{position:fixed;top:0;right:0;height:100vh;width:var(--az-rail-w,${RAIL_W}px);max-width:100vw;background:#161a21;border-left:1px solid #252b36;
-    transform:translateX(100%);transition:transform .2s ease;z-index:2147483000;display:flex;flex-direction:column}
+    transform:translateX(100%);transition:transform .2s ease,width .2s ease;z-index:2147483000;display:flex;flex-direction:column}
   .ui.railopen .rail{transform:none}
   .rail.sizing{transition:none}
+  /* Full window: the rail covers the page (the page keeps its layout underneath); content stays a readable width. */
+  .ui.full .rail{width:100vw;border-left:none}
+  .ui.full .grip,.ui.full .dock,.ui.full .menu{display:none}
+  .ui.full .filters,.ui.full .list,.ui.full footer{padding-left:max(12px,calc(50vw - 440px));padding-right:max(12px,calc(50vw - 440px))}
+  .ui.full .shot{max-height:360px}
+  .fullbtn{display:flex;align-items:center;justify-content:center;padding:4px 6px}
+  .fullbtn svg{width:15px;height:15px;display:block}
+  .fullbtn+.x{margin-left:0}
+  .fullbtn .in,.ui.full .fullbtn .out{display:none}
+  .ui.full .fullbtn .in{display:block}
+  @media (max-width:760px){.fullbtn{display:none}.fullbtn+.x{margin-left:auto}}
   .grip{position:absolute;top:0;left:-4px;width:8px;height:100%;cursor:col-resize;z-index:2;touch-action:none}
   .grip::after{content:"";position:absolute;top:0;bottom:0;left:3px;width:2px;background:transparent;transition:background .15s .1s}
   .grip:hover::after,.grip:focus-visible::after,.rail.sizing .grip::after{background:#7c9cff}
@@ -279,6 +290,7 @@
   .toast{position:fixed;top:16px;left:50%;transform:translate(-50%,-6px);background:#e7e9ee;color:#0f1115;font-weight:600;font-size:12.5px;
     padding:9px 15px;border-radius:10px;opacity:0;transition:opacity .18s,transform .18s;pointer-events:none;z-index:2147483003;max-width:80vw}
   .ui.railopen .toast{left:calc((100vw - var(--az-rail-w,${RAIL_W}px)) / 2)}
+  .ui.full .toast{left:50%;top:auto;bottom:84px}
   .toast.show{opacity:1;transform:translate(-50%,0)}
   .pastebox{position:fixed;top:20%;left:10%;width:80%;height:50%;z-index:2147483003;background:#0f1319;color:#e7e9ee;border:1px solid #7c9cff;border-radius:10px;padding:10px;font:12px ${MONO}}
   @media (prefers-reduced-motion:reduce){.rail,.adder,.chip,.card,.toast,.tool,.dock{transition:none}.skline{animation:none}}
@@ -292,7 +304,7 @@
   <div class="ui" id="ui">
     <aside class="rail" id="rail">
       <div class="grip" id="grip" role="separator" aria-orientation="vertical" aria-label="Resize threads panel" tabindex="0" title="Drag to resize · double-click to reset"></div>
-      <header><b><span class="ic">💬</span>Threads</b><span class="live">· ⚡ live</span><button class="x" id="closeRail" title="Close">✕</button></header>
+      <header><b><span class="ic">💬</span>Threads</b><span class="live">· ⚡ live</span><button class="x fullbtn" id="fullBtn" title="Expand to full window" aria-label="Expand to full window" aria-pressed="false"><svg class="out" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9"/></svg><svg class="in" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 6.5h-4v-4M9.5 6.5l4-4M2.5 9.5h4v4M6.5 9.5l-4 4"/></svg></button><button class="x" id="closeRail" title="Close">✕</button></header>
       <div class="filters">
         <button class="chip on" data-filter="all">All<span class="n" id="cAll">0</span></button>
         <button class="chip" data-filter="open">Unanswered<span class="n" id="cOpen">0</span></button>
@@ -738,7 +750,12 @@
     if (save) writeLS(RAILWKEY, railW);
     scheduleLayout();
   }
+  function setFull(on) {
+    ui.classList.toggle('full', on); const b = $('fullBtn'), t = on ? 'Back to side panel' : 'Expand to full window';
+    b.setAttribute('aria-pressed', on); b.title = t; b.setAttribute('aria-label', t);
+  }
   function setRail(open) {
+    if (!open) setFull(false);
     ui.classList.toggle('railopen', open); HTML.classList.toggle('az-railopen', open);
     scheduleLayout();
   }
@@ -887,9 +904,10 @@
     const t = e.composedPath()[0];
     if (t && (/^(input|textarea|select)$/i.test(t.tagName) || t.isContentEditable)) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;   // leave ⌘E, ⌘R, ⌘V etc. to the browser
-    if (e.key === 'Escape') { if (menuOpen()) hideMenu(); else if (openId) closeThread(); else if (tool !== 'select') setTool('select'); hideAdder(); return; }
+    if (e.key === 'Escape') { if (menuOpen()) hideMenu(); else if (openId) closeThread(); else if (ui.classList.contains('full')) setFull(false); else if (tool !== 'select') setTool('select'); hideAdder(); return; }
     if (!HTML.classList.contains('az-on')) return;
     const k = e.key.toLowerCase();
+    if ((k === 'r' || k === 'e') && ui.classList.contains('full')) setFull(false);   // drawing needs the page
     if (k === 'v') setTool('select');
     else if (k === 'r') setTool('region');
     else if (k === 'e') setTool('element');
@@ -899,6 +917,7 @@
   $('offBtn').onclick = () => setAnnot(false);
   $('dockThreads').onclick = () => { setRail(!ui.classList.contains('railopen')); renderRail(); };
   $('closeRail').onclick = () => setRail(false);
+  $('fullBtn').onclick = () => setFull(!ui.classList.contains('full'));
   {
     const grip = $('grip'), rail = $('rail'); let raf = 0;
     grip.addEventListener('pointerdown', e => {

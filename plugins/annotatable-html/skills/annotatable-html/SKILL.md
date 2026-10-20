@@ -23,7 +23,7 @@ An addon that makes an HTML page **annotatable**: the user selects text, drags a
 | Anchor | How the user makes it | Re-located on reload by |
 |--------|-----------------------|--------------------------|
 | Text | select words → **Comment**/**Highlight** pill | exact phrase (+ prefix) |
-| Region | press **`R`** → drag a box over anything | content-relative fractions + the window and content size it was drawn at; the bridge saves a picture of the box |
+| Region | press **`R`** → drag a box over anything | the page blocks it covers (box edges saved relative to them, so it stays put when the sidebar or window size rewraps the text), plus content-relative fractions and the window and content size it was drawn at as a fallback; the bridge saves a picture of the box |
 | Element | press **`E`** → click a block | CSS selector, then tag+text fallback |
 
 - Keys: **`V`** select · **`R`** region · **`E`** element · **`Esc`** cancel · **⌘/Ctrl+Enter** save · **🔒** tool-lock (place many).

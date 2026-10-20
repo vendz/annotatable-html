@@ -559,7 +559,7 @@
       else if (t.type === 'element') { const e = elFromAnchor(t.anchor || {}); if (e) { e.classList.add('az-el-mark'); if (done) e.classList.add('az-done'); } }
     }
     ranges.forEach(([r, id, done]) => wrapRange(r, id, done));   // live ranges survive earlier splits
-    layoutPins();
+    upgradeRegions(); layoutPins();
   }
   function markRect(id) {
     const t = threads[id]; if (!t) return null;
@@ -567,9 +567,67 @@
     if (t.type === 'region') return regionRect(t.anchor);
     if (t.type === 'element') { const e = elFromAnchor(t.anchor || {}); return e && e.getBoundingClientRect(); }
   }
+  // A region is pinned to the page pieces it was drawn over (a.els). Each box edge is saved as a
+  // fraction of their joint bounds (a.f: left, top, right, bottom), or, where the edge sits
+  // outside them, as a fixed pixel margin (a.m) so slack around a paragraph doesn't grow when it
+  // rewraps. When the sidebar or window size makes the text rewrap, the box follows those pieces.
+  // The content-wide fractions (x/y/w/h) are the fallback, and what the bridge uses.
   function regionRect(a) {
+    const u = a.els && a.f && unionRect(a.els.map(regionEl).filter(Boolean));
+    if (u && u.width && u.height) {
+      const m = a.m || [], ux = f => u.left + f * u.width, uy = f => u.top + f * u.height;
+      const l = m[0] != null ? u.left - m[0] : ux(a.f[0]), t = m[1] != null ? u.top - m[1] : uy(a.f[1]);
+      const r = m[2] != null ? u.left + u.width + m[2] : ux(a.f[2]), b = m[3] != null ? u.top + u.height + m[3] : uy(a.f[3]);
+      return { left: l, top: t, width: Math.max(4, r - l), height: Math.max(4, b - t) };
+    }
     const cr = content.getBoundingClientRect(), bx = cr.left + content.clientLeft, by = cr.top + content.clientTop;
     return { left: bx + a.x * content.offsetWidth, top: by + a.y * content.offsetHeight, width: a.w * content.offsetWidth, height: a.h * content.offsetHeight };
+  }
+  function regionEl(sel) { try { return content.querySelector(sel); } catch (e) { return null; } }
+  function unionRect(els) {
+    let l = 1e9, t = 1e9, r = -1e9, b = -1e9;
+    els.forEach(e => { const q = e.getBoundingClientRect(); if (!q.width && !q.height) return; l = Math.min(l, q.left); t = Math.min(t, q.top); r = Math.max(r, q.right); b = Math.max(b, q.bottom); });
+    return r > l ? { left: l, top: t, width: r - l, height: b - t } : null;
+  }
+  // The smallest set of blocks that together cover the box: blocks fully inside it, or the deepest
+  // block it cuts through (a diagram, a formula, a paragraph). Inline bits never count, so a box
+  // over half a paragraph pins to the paragraph, not to one bold word in it.
+  const LEAF = /^(svg|img|canvas|video|picture|iframe|pre|table|math)$/i;
+  function regionPieces(box) {
+    const hit = q => Math.max(0, Math.min(q.right, box.right) - Math.max(q.left, box.left)) * Math.max(0, Math.min(q.bottom, box.bottom) - Math.max(q.top, box.top));
+    const boxA = (box.right - box.left) * (box.bottom - box.top), out = [];
+    const walk = el => {
+      for (const c of el.children) {
+        if (/^(az-annotate|script|style|template)$/i.test(c.tagName) || c.classList.contains('az-hl')) continue;
+        const q = c.getBoundingClientRect(), a = q.width * q.height, h = hit(q);
+        if (!a || h < Math.max(16, boxA * 0.02)) continue;
+        const blockKids = !LEAF.test(c.tagName) && [...c.children].some(k => !/^inline/.test(getComputedStyle(k).display) && hit(k.getBoundingClientRect()) > 0);
+        if (h >= a * 0.85 || !blockKids) out.push(c); else walk(c);
+      }
+    };
+    walk(content);
+    return out.length > 40 ? [] : out;
+  }
+  function regionAnchorEls(box) {
+    const els = regionPieces(box); if (!els.length) return null;
+    const u = unionRect(els); if (!u) return null;
+    const sels = els.map(e => e.id ? '#' + CSS.escape(e.id) : ':scope>' + selectorFor(e));
+    if (sels.some((q, i) => regionEl(q) !== els[i])) return null;
+    const r4 = v => Math.round(v * 1e4) / 1e4, ur = u.left + u.width, ub = u.top + u.height, px = v => v >= 0 ? Math.round(v) : null;
+    return { els: sels, f: [r4((box.left - u.left) / u.width), r4((box.top - u.top) / u.height), r4((box.right - u.left) / u.width), r4((box.bottom - u.top) / u.height)],
+      m: [px(u.left - box.left), px(u.top - box.top), px(box.right - ur), px(box.bottom - ub)] };
+  }
+  // Boxes drawn before pieces were saved: pin them now if the page is laid out as when drawn.
+  function upgradeRegions() {
+    let changed = false;
+    for (const id in threads) {
+      const t = threads[id], a = t.anchor;
+      if (t.type !== 'region' || !a || a.els || !a.vw) continue;
+      const v = viewSize(); if (v.vw !== a.vw || v.pad !== a.pad) continue;
+      const r = regionRect(a), more = regionAnchorEls({ left: r.left, top: r.top, right: r.left + r.width, bottom: r.top + r.height });
+      if (more) { Object.assign(a, more); changed = true; }
+    }
+    if (changed) persist();
   }
   let layoutRaf = 0;
   function scheduleLayout() { cancelAnimationFrame(layoutRaf); layoutRaf = requestAnimationFrame(layoutPins); }
@@ -587,7 +645,7 @@
       live.add(id);
       if (t.type === 'region') {
         const b = regions[id] || (regions[id] = layer.appendChild(Object.assign(document.createElement('div'), { className: 'region' })));
-        b.classList.toggle('done', st === 'done');
+        b.dataset.tid = id; b.classList.toggle('done', st === 'done');
         Object.assign(b.style, { left: (r.left - lr.left) + 'px', top: (r.top - lr.top) + 'px', width: r.width + 'px', height: r.height + 'px' });
       }
       const pin = pins[id] || (pins[id] = makePin(id));
@@ -843,7 +901,9 @@
     const id = uid(), W = content.offsetWidth, H = content.offsetHeight;
     // vw/vh/pad: the window the box was drawn in; cw/ch: the content size then. The bridge uses
     // both to re-render the same spot for a picture, even if the page height later shifts a little.
-    threads[id] = { type: 'region', anchor: Object.assign({ type: 'region', x: box.l / W, y: box.t / H, w: box.w / W, h: box.h / H, cw: W, ch: H }, viewSize()), label: 'region near ' + nearestHeading(box.t), messages: [] };
+    const cr = content.getBoundingClientRect(), bl = cr.left + content.clientLeft + box.l, bt = cr.top + content.clientTop + box.t;
+    const pinTo = regionAnchorEls({ left: bl, top: bt, right: bl + box.w, bottom: bt + box.h });
+    threads[id] = { type: 'region', anchor: Object.assign({ type: 'region', x: box.l / W, y: box.t / H, w: box.w / W, h: box.h / H, cw: W, ch: H }, viewSize(), pinTo), label: 'region near ' + nearestHeading(box.t), messages: [] };
     persist(); layoutPins(); renderRail(); openThread(id); if (!locked) setTool('select');
   });
   // Window size plus the rail's push (padding-right on <html>), so the bridge can lay the page out

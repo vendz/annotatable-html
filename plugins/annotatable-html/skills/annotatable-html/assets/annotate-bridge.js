@@ -276,6 +276,7 @@ const STYLE_RULES = [
   '- Be concise. Start with the direct answer in one or two short sentences. Add detail only if it helps, as a short list.',
   '- Do not name files, paths, functions or variables unless the reader asks for them. Describe what the code does instead.',
   '- Say plainly when you are not sure or the doc does not say.',
+  '- Write math in LaTeX: \\( … \\) inside a sentence, \\[ … \\] on its own line. Put code in fenced blocks with the language name (```python). Small comparisons can be a markdown table. The page renders all of these.',
 ].join('\n');
 function buildBasePrompt(base, projectDir) {
   const doc = base + '.html';
@@ -291,12 +292,14 @@ function buildThreadPrompt(base, item, opts) {
   const qs = item.questions.length === 1 ? item.questions[0] : item.questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
   const parts = [];
   if (opts.followup) parts.push(`Follow-up in the same thread about "${base}.html":`);
+  else if (opts.snap) parts.push(`A reader drew a box on "${base}.html" and asked about what is inside it. The box is below the heading ${JSON.stringify(String(item.label || '').replace(/^region near /, ''))}.`);
   else parts.push(`A reader asked about this part of "${base}.html": ${JSON.stringify(item.label)}` + (item.anchor && item.anchor.type ? ` (a ${item.anchor.type} they marked).` : '.'));
   if (opts.primed === false) parts.push(`The doc is "${path.join(ROOT, base + '.html')}" — read it before answering.`);
   // Named on every turn: a resumed thread may predate a relink, and the standalone path has no prime.
   parts.push(opts.projectDir
     ? `The doc was built from the folder "${opts.projectDir}". When the doc alone does not settle the question, check that folder.`
     : 'No source folder is linked to this doc. Answer from the doc; if it does not cover something, say so instead of guessing.');
+  if (opts.snap) parts.push(`The reader drew a box on the page. A picture of exactly what is inside that box is at "${opts.snap}". Open that image and look at it before you answer, unless you already did earlier in this thread. When they say "this" or "here", they mean what the picture shows. Use the doc to explain it.`);
   if (opts.history && opts.history.length) {
     parts.push('Earlier in this thread:\n' + opts.history.map(m => (m.role === 'user' ? 'Reader: ' : 'You: ') + m.text).join('\n'));
   }
@@ -360,9 +363,10 @@ async function runClaude({ prompt, model, resumeId, fork, sessionId, addDirs, on
 }
 // Codex: `exec --json` emits whole messages (no token deltas). --ignore-user-config skips the
 // user's MCP servers/plugins (8.5s → ~3s startup); auth still comes from CODEX_HOME.
-async function runCodex({ prompt, model, effort, resumeId, fork, onDelta, timeoutMs }) {
+async function runCodex({ prompt, model, effort, resumeId, fork, image, onDelta, timeoutMs }) {
   const common = ['--json', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules', '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"'];
   if (model) common.push('-m', model);
+  if (image) common.push('--image=' + image);   // `=` form: the flag takes many values and would swallow the next argument
   if (effort) common.push('-c', `model_reasoning_effort="${effort}"`);
   const args = resumeId ? ['exec', fork ? 'fork' : 'resume', ...common, resumeId, prompt] : ['exec', ...common, prompt];
   let sid = null, last = '', failed = null;
@@ -381,6 +385,136 @@ function runModel(choice, opts) {
   return choice.backend === 'codex'
     ? runCodex(Object.assign({ model: choice.model, effort: choice.effort }, opts))
     : runClaude(Object.assign({ model: choice.model }, opts));
+}
+
+/* ---------------------------------- region pictures ---------------------------------- */
+// A region anchor is only a box in fractions of the content area — the model can't see what it
+// covers. So the bridge opens the doc in a hidden Chrome (driven over --remote-debugging-pipe,
+// no dependencies), lays it out at the size the box was drawn at, and saves a picture of the box.
+const SNAP_DIR = path.join(ROOT, '.annot-snaps');
+const SNAP_TIMEOUT_MS = 20 * 1000;
+const SNAP_MAX_PX = 4e6;   // output pixel budget; big boxes get a lower scale instead of a huge PNG
+const snapPath = (base, id) => path.join(SNAP_DIR, base, id + '.png');
+function findBrowser() {
+  // ANNOT_CHROME, when set, is the only choice (a bad path or "off" means no pictures).
+  if (process.env.ANNOT_CHROME) { try { fs.accessSync(process.env.ANNOT_CHROME, fs.constants.X_OK); return process.env.ANNOT_CHROME; } catch (e) { return null; } }
+  const cands = [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'];
+  try {   // Playwright's downloaded Chromium, newest first
+    const pw = path.join(os.homedir(), 'Library/Caches/ms-playwright');
+    fs.readdirSync(pw).filter(d => /^chromium-\d+$/.test(d)).sort((a, b) => b.split('-')[1] - a.split('-')[1]).forEach(d => {
+      for (const arch of ['chrome-mac-arm64', 'chrome-mac']) cands.push(path.join(pw, d, arch, 'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'), path.join(pw, d, arch, 'Chromium.app/Contents/MacOS/Chromium'));
+    });
+  } catch (e) {}
+  for (const name of ['google-chrome', 'chromium', 'chromium-browser']) cands.push(name);
+  for (const c of cands) {
+    if (!c) continue;
+    if (c.includes('/')) { try { fs.accessSync(c, fs.constants.X_OK); return c; } catch (e) { continue; } }
+    if (spawnSync('which', [c]).status === 0) return c;
+  }
+  return null;
+}
+// Runs in the hidden page: same content scope + box math as annotate.js, in page pixels.
+const CLIP_JS = a => `(() => {
+  const C = window.ANNOTATE_CONFIG || {}, a = ${JSON.stringify(a)};
+  const el = (C.contentSelector && document.querySelector(C.contentSelector)) || document.querySelector('main,article,.wrap') || document.body;
+  // Pixels from the content's top-left, using the content size saved when the box was drawn (older
+  // anchors: the size now), so a small height change elsewhere in the page doesn't move the box.
+  const W = a.cw || el.offsetWidth, H = a.ch || el.offsetHeight;
+  const top = r => r.top + el.clientTop + scrollY + a.y * H;
+  // Scroll the box into view: a full-page capture resizes the window to the whole page, which can shift the layout.
+  scrollTo({ left: 0, top: Math.max(0, top(el.getBoundingClientRect()) - 20), behavior: 'instant' });   // instant: some docs set smooth scrolling
+  const r = el.getBoundingClientRect();
+  return { x: r.left + el.clientLeft + scrollX + a.x * W, y: top(r), width: a.w * W, height: a.h * H, fits: a.h * H <= innerHeight - 20 };
+})()`;
+// Resolves the saved PNG path, or null (no browser, bad anchor, timeout) — the question then
+// goes out without a picture, as before.
+// One picture per thread (follow-ups see what the reader saw); one hidden Chrome at a time.
+const snapping = new Map();
+function snapRegion(base, id, anchor, view) {
+  if (!anchor || anchor.type !== 'region' || !SELF_ORIGIN) return Promise.resolve(null);
+  const out = snapPath(base, id);
+  if (fs.existsSync(out)) return Promise.resolve(out);
+  const key = base + '#' + id;
+  if (!snapping.has(key)) snapping.set(key, withQueue('snap', () => takeSnap(base, id, anchor, view, out)).finally(() => snapping.delete(key)));
+  return snapping.get(key);
+}
+async function takeSnap(base, id, anchor, view, out) {
+  if (fs.existsSync(out)) return out;
+  const nums = ['x', 'y', 'w', 'h'].map(k => Number(anchor[k]));
+  if (!nums.every(Number.isFinite) || nums[2] <= 0 || nums[3] <= 0) return null;
+  // vw/vh/pad = the reader's window and the rail's push. Anchors saved before pad existed stored
+  // the width without the rail; pad 0 reproduces that.
+  const size = anchor.vw ? anchor : (view || {});
+  const vw = Math.round(Number(size.vw) || 1280), vh = Math.round(Number(size.vh) || 900), pad = Math.max(0, Math.round(Number(size.pad) || 0));
+  const bin = findBrowser();
+  if (!bin) { console.log(`  (${process.env.ANNOT_CHROME ? `ANNOT_CHROME="${process.env.ANNOT_CHROME}" is not a browser` : "no Chrome/Chromium found"} — ${base}#${id} asked without a picture)`); return null; }
+  const prof = fs.mkdtempSync(path.join(os.tmpdir(), 'annot-snap-'));
+  let proc;
+  try {
+    proc = spawn(bin, ['--headless=new', '--remote-debugging-pipe', '--no-first-run', '--no-default-browser-check', '--hide-scrollbars',
+      '--disable-extensions', '--user-data-dir=' + prof, 'about:blank'], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
+  } catch (e) { fs.rmSync(prof, { recursive: true, force: true }); return null; }
+  let n = 0, buf = '', onEvent = () => {};
+  const waiting = {};
+  const fail = new Promise((_, rej) => {
+    proc.on('error', e => rej(new Error('browser failed to start: ' + e.message)));
+    proc.on('exit', () => rej(new Error('browser exited')));
+    setTimeout(() => rej(new Error(`timed out after ${SNAP_TIMEOUT_MS / 1000}s`)), SNAP_TIMEOUT_MS);
+  });
+  fail.catch(() => {});
+  proc.stdio[4].on('data', d => {
+    buf += d; let i;
+    while ((i = buf.indexOf('\0')) >= 0) {
+      let m; try { m = JSON.parse(buf.slice(0, i)); } catch (e) { m = {}; } buf = buf.slice(i + 1);
+      if (m.id && waiting[m.id]) { waiting[m.id](m); delete waiting[m.id]; } else if (m.method) onEvent(m);
+    }
+  });
+  proc.stdio[3].on('error', () => {});
+  const send = (method, params, sessionId) => Promise.race([fail, new Promise((res, rej) => {
+    const msgId = ++n; waiting[msgId] = m => m.error ? rej(new Error(method + ': ' + m.error.message)) : res(m.result || {});
+    proc.stdio[3].write(JSON.stringify({ id: msgId, method, params: params || {}, sessionId }) + '\0');
+  })]);
+  try {
+    const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
+    const { sessionId: s } = await send('Target.attachToTarget', { targetId, flatten: true });
+    await send('Page.enable', {}, s);
+    await send('Emulation.setDeviceMetricsOverride', { width: vw, height: vh, deviceScaleFactor: 1, mobile: false }, s);
+    const loaded = new Promise(res => { onEvent = m => { if (m.method === 'Page.loadEventFired' && m.sessionId === s) res(); }; });
+    const nav = await send('Page.navigate', { url: `${SELF_ORIGIN}/${encodeURIComponent(base)}.html?az-snap=1` }, s);
+    if (nav.errorText) throw new Error('page failed to load: ' + nav.errorText);
+    await Promise.race([fail, loaded]);
+    // Push the page in like the rail did.
+    const push = pad ? `document.documentElement.style.setProperty('padding-right','${pad}px','important'); dispatchEvent(new Event('resize'));` : '';
+    // Then wait (up to 3s) for the page height to hold still: scripted parts may still be laying out.
+    const settle = `(async () => { await document.fonts.ready; let h = -1, same = 0;
+      for (let i = 0; i < 30 && same < 3; i++) { await new Promise(r => setTimeout(r, 100)); const n = document.documentElement.scrollHeight; same = n === h ? same + 1 : 0; h = n; } })()`;
+    await send('Runtime.evaluate', { expression: push + settle, awaitPromise: true }, s);
+    const ev = await send('Runtime.evaluate', { expression: CLIP_JS({ x: nums[0], y: nums[1], w: nums[2], h: nums[3], cw: Number(anchor.cw) || 0, ch: Number(anchor.ch) || 0 }), returnByValue: true }, s);
+    const c = ev.result && ev.result.value;
+    if (!c || !(c.width >= 1 && c.height >= 1)) throw new Error('box has no size in the rendered page');
+    const scale = Math.min(2, Math.sqrt(SNAP_MAX_PX / (c.width * c.height)));
+    await send('Runtime.evaluate', { expression: 'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))', awaitPromise: true }, s);
+    const fits = c.fits; delete c.fits;
+    const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: !fits, clip: Object.assign(c, { scale }) }, s);
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    fs.writeFileSync(out, Buffer.from(shot.data, 'base64'));
+    console.log(`  ▭ pictured ${base}#${id} (${Math.round(c.width)}×${Math.round(c.height)} at ${vw}px wide${pad ? `, rail ${pad}px` : ''})`);
+    return out;
+  } catch (e) {
+    console.log(`  (region picture failed for ${base}#${id}: ${e.message} — asked without it)`);
+    return null;
+  } finally {
+    if (proc.exitCode === null && proc.signalCode === null) {
+      const gone = new Promise(res => { proc.once('exit', res); setTimeout(res, 2000); });
+      try { proc.kill('SIGKILL'); } catch (e) {}
+      await gone;
+    }
+    fs.rmSync(prof, { recursive: true, force: true });
+  }
 }
 
 /* ---------------------------------- sessions ---------------------------------- */
@@ -413,29 +547,32 @@ async function answerThread(base, item, choice, emit) {
   const fileEntry = (readThreadsFile(base) || {})[item.id];
   const history = fileEntry && Array.isArray(fileEntry.messages) ? fileEntry.messages : [];
   const own = loadSessions(base).threads[item.id];
+  // Region boxes: the model gets a picture of the box (Claude opens the file; Codex gets it attached).
+  const snap = await snapRegion(base, item.id, item.anchor || (fileEntry && fileEntry.anchor), item.view);
+  const image = choice.backend === 'codex' ? snap : null;
 
   let r = null, sessionId = null;
   if (own && own.backend === choice.backend) {
-    r = await runModel(choice, { prompt: buildThreadPrompt(base, item, { followup: true, primed: true, projectDir: proj.dir }), resumeId: own.id, addDirs, onDelta, onReset });
+    r = await runModel(choice, { prompt: buildThreadPrompt(base, item, { followup: true, primed: true, projectDir: proj.dir, snap }), resumeId: own.id, image, addDirs, onDelta, onReset });
     if (r.ok) sessionId = r.sessionId || own.id;
     else { console.log(`↻ resume failed for ${base}#${item.id} (${r.error}) — starting a fresh thread session`); onReset(); }
   }
   if (!r || !r.ok) {
     // New thread, a backend switch, or a dead session: fork the doc's primed base session and
     // replay the thread's history so nothing is lost.
-    const prompt = opts => buildThreadPrompt(base, item, Object.assign({ followup: history.length > 0, history, projectDir: proj.dir }, opts));
+    const prompt = opts => buildThreadPrompt(base, item, Object.assign({ followup: history.length > 0, history, projectDir: proj.dir, snap }, opts));
     let baseId = await ensureBase(base, choice);
     if (baseId) {
       const tid = choice.backend === 'claude' ? crypto.randomUUID() : undefined;
-      r = await runModel(choice, { prompt: prompt({ primed: true }), resumeId: baseId, fork: true, sessionId: tid, addDirs, onDelta, onReset });
+      r = await runModel(choice, { prompt: prompt({ primed: true }), resumeId: baseId, fork: true, sessionId: tid, image, addDirs, onDelta, onReset });
       if (!r.ok) {
         console.log(`↻ fork from base failed for ${base} (${r.error}) — re-priming`); onReset();
         await updateSessions(base, s => { if (s.bases[choice.backend] === baseId) delete s.bases[choice.backend]; });
         baseId = await ensureBase(base, choice);
-        if (baseId) r = await runModel(choice, { prompt: prompt({ primed: true }), resumeId: baseId, fork: true, sessionId: choice.backend === 'claude' ? crypto.randomUUID() : undefined, addDirs, onDelta, onReset });
+        if (baseId) r = await runModel(choice, { prompt: prompt({ primed: true }), resumeId: baseId, fork: true, sessionId: choice.backend === 'claude' ? crypto.randomUUID() : undefined, image, addDirs, onDelta, onReset });
       }
     }
-    if (!r || !r.ok) { onReset(); r = await runModel(choice, { prompt: prompt({ primed: false }), sessionId: choice.backend === 'claude' ? crypto.randomUUID() : undefined, addDirs, onDelta, onReset }); } // last resort: standalone
+    if (!r || !r.ok) { onReset(); r = await runModel(choice, { prompt: prompt({ primed: false }), sessionId: choice.backend === 'claude' ? crypto.randomUUID() : undefined, image, addDirs, onDelta, onReset }); } // last resort: standalone
     if (r.ok) sessionId = r.sessionId;
   }
   if (!r.ok) return { ok: false, error: r.error, warning };
@@ -465,7 +602,7 @@ const server = http.createServer((req, res) => {
   if (url === '/__annot/ping') return sendJSON(res, 200, { ok: true, root: ROOT, v: 2 });
   if (url === '/__annot/models' && req.method === 'GET') return sendJSON(res, 200, getModels());
 
-  const mutating = req.method === 'POST' && /^\/__annot\/(ask|prime|set-project|delete|delete-thread)$/.test(url);
+  const mutating = req.method === 'POST' && /^\/__annot\/(ask|prime|snap|set-project|delete|delete-thread)$/.test(url);
   if (mutating && !originOk(req)) return sendJSON(res, 403, { ok: false, error: 'cross-origin request rejected' });
 
   if (req.method === 'POST' && url === '/__annot/prime') {
@@ -477,12 +614,20 @@ const server = http.createServer((req, res) => {
     });
   }
 
+  // The page asks for a region's picture as soon as the box is drawn, so the card can show it.
+  if (req.method === 'POST' && url === '/__annot/snap') {
+    return readBody(req, 1e4, j => {
+      if (!j || !safeBase(j.base) || !safeId(j.id) || !docExists(j.base)) return sendJSON(res, 400, { ok: false, error: 'bad request' });
+      snapRegion(j.base, j.id, j.anchor, j.view).then(p => sendJSON(res, 200, p ? { ok: true } : { ok: false, error: 'no picture' }), e => sendJSON(res, 500, { ok: false, error: e.message }));
+    });
+  }
+
   if (req.method === 'POST' && url === '/__annot/ask') {
     return readBody(req, 5e6, j => {
       if (!j || !safeBase(j.base)) return sendJSON(res, 400, { ok: false, error: 'bad request' });
       const choice = normalizeChoice(j);
       // Legacy batch shape ({ base, batch:[{id,label,anchor,questions}] }) → plain JSON reply.
-      const items = Array.isArray(j.batch) ? j.batch : [{ id: j.id, label: j.label, anchor: j.anchor, questions: j.questions }];
+      const items = Array.isArray(j.batch) ? j.batch : [{ id: j.id, label: j.label, anchor: j.anchor, view: j.view, questions: j.questions }];
       if (!items.length || !items.every(it => it && safeId(it.id) && Array.isArray(it.questions) && it.questions.length && it.questions.every(q => typeof q === 'string')))
         return sendJSON(res, 400, { ok: false, error: 'bad request' });
       const stream = !!j.stream && items.length === 1;
@@ -513,6 +658,7 @@ const server = http.createServer((req, res) => {
         if (obj === null) return { ok: false, error: 'threads file is not valid JS' };
         if (obj[j.id]) { delete obj[j.id]; writeThreadsFile(j.base, obj); }
         const s = loadSessions(j.base); if (s.threads[j.id]) { delete s.threads[j.id]; saveSessions(j.base, s); }
+        try { fs.unlinkSync(snapPath(j.base, j.id)); } catch (e) {}
         console.log(`✗ deleted thread ${j.base}#${j.id}`);
         return { ok: true };
       }).then(r => sendJSON(res, 200, r), e => sendJSON(res, 500, { ok: false, error: e.message }));
@@ -537,6 +683,7 @@ const server = http.createServer((req, res) => {
         for (const suffix of ['.html', '.htm', '-threads.js', '-questions.json', '.sessions.json', '.project.json']) {
           try { fs.unlinkSync(path.join(ROOT, j.base + suffix)); } catch (e) {}
         }
+        fs.rmSync(path.join(SNAP_DIR, j.base), { recursive: true, force: true });
         console.log(`✗ deleted ${j.base}`);
         return { ok: true };
       }).then(r => sendJSON(res, 200, r), e => sendJSON(res, 500, { ok: false, error: e.message }));

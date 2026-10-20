@@ -1,33 +1,34 @@
 ---
 name: annotatable-html
-description: An opt-in addon that adds pinned comment threads to any HTML page or site, new or existing. Use ONLY when the user asks for it, in words like "make this annotatable", "add annotations", "add comment threads", "let me comment on this page", or "let me ask questions on the page". Do NOT use it just because the output is a doc, spec, report, dashboard, diagram, or other HTML meant to be read.
+description: An addon that adds pinned comment threads to any HTML page or site, new or existing. Use when the user asks for it, in words like "make this annotatable", "add annotations", "add comment threads", "let me comment on this page", or "let me ask questions on the page" — or on every HTML page you make when the user's own instructions (CLAUDE.md, AGENTS.md) make it the default. Without either, do not add it just because the output is a doc, spec, report, dashboard, diagram, or other HTML meant to be read.
 ---
 
 # Annotatable HTML
 
 ## Overview
 
-An opt-in addon that makes an HTML page **annotatable**: the user selects text, drags a box over a diagram, or clicks an element in the browser, pins a question to it, and gets an answer from Claude or Codex — a cross-session Q&A layer. No API key; an optional local helper (the bridge) makes answers automatic.
+An addon that makes an HTML page **annotatable**: the user selects text, drags a box over a diagram, or clicks an element in the browser, pins a question to it, and gets an answer from Claude or Codex — a cross-session Q&A layer. No API key; an optional local helper (the bridge) makes answers automatic.
 
-**Opt-in only.** Add it only when the user asks ("make this annotatable", "let me comment on it", "add threads", "annotate this"). A doc, spec or report is not by itself a reason to add it.
+**Opt-in, unless the user made it the default.** Add it when the user asks ("make this annotatable", "let me comment on it", "add threads", "annotate this"), or on every HTML page you make when their own instructions say it is the default. Otherwise a doc, spec or report is not by itself a reason to add it.
 
 ## When to use
 
 - The user says "make this annotatable", "add comment threads", "let me comment on it", "let me ask questions on the page", or names this feature — for a new page or an existing one.
+- The user's instructions make it the default — then add it to every new HTML page or site you make, without being asked.
 
-**When NOT to use:** any HTML the user did not ask to annotate, however doc-like it is.
+**When NOT to use:** any HTML the user did not ask to annotate and whose instructions do not make it the default, however doc-like it is. Also not on pages published to claude.ai — the local bridge cannot reach them.
 
 ## Quick reference
 
 | Anchor | How the user makes it | Re-located on reload by |
 |--------|-----------------------|--------------------------|
 | Text | select words → **Comment**/**Highlight** pill | exact phrase (+ prefix) |
-| Region | press **`R`** → drag a box over anything | content-relative fractions |
+| Region | press **`R`** → drag a box over anything | content-relative fractions + the window and content size it was drawn at; the bridge saves a picture of the box |
 | Element | press **`E`** → click a block | CSS selector, then tag+text fallback |
 
 - Keys: **`V`** select · **`R`** region · **`E`** element · **`Esc`** cancel · **⌘/Ctrl+Enter** save · **🔒** tool-lock (place many).
 - Element mode (`E`) shows a small tag+text badge over whatever's under the cursor before you click, so you know what you're about to anchor to.
-- Pins: **amber** = unanswered, **green ✓** = answered. They sit in the gutter right of the content (never on top of words), staggered when several share a line. Threads expand **inline in the sidebar** with All / Unanswered / Answered filters. Answers render as **markdown** and **stream in word by word** (Claude); long code and paths wrap inside the bubble.
+- Pins: **amber** = unanswered, **green ✓** = answered. They sit in the gutter right of the content (never on top of words), staggered when several share a line. Threads expand **inline in the sidebar** with All / Unanswered / Answered filters. Answers render as **markdown** and **stream in word by word** (Claude). Math (`\( … \)`, `\[ … \]`, `$…$`, `$$…$$`) renders with KaTeX, fenced code is highlighted with highlight.js (scrolls sideways, no wrapping), and markdown tables render as tables. Both libraries load from jsDelivr only when an answer needs them; offline, math shows as raw TeX and code stays plain. Only KaTeX's `@font-face` rules go in the page head, so the doc's own styles are untouched.
 - **Model picker** in the dock (bridge only): Claude (Fable 5.1 / Opus / Sonnet / Haiku) or Codex (models + effort levels read from the local Codex install). The choice is shared by all docs; each answer is labelled with who wrote it (`by` field).
 - Two answer paths, auto-picked: **Copy button** (works everywhere) or **auto-answer bridge** (`⚡ live`, zero copy-paste).
 - Answers follow a fixed style: plain English, concise, no jargon, no file/function names unless the reader asks. The rules live in the bridge's answer prompt and in the Copy batch text.
@@ -40,11 +41,10 @@ All annotated docs live in **one shared home: `~/annotated-docs/`**. The engine 
 
 1. **Ensure the shared home exists** (create once; skip if present):
    ```bash
-   SKILL_DIR="<this skill's base directory>"   # e.g. ~/.claude/skills/annotatable-html, or the plugin install path
    mkdir -p ~/annotated-docs && cd ~/annotated-docs \
-     && ln -sf "$SKILL_DIR/assets/annotate.js" . \
-     && ln -sf "$SKILL_DIR/assets/annotate-bridge.js" . \
-     && cp "$SKILL_DIR/assets/open-docs.command.template" "Open annotated docs (live).command" \
+     && ln -sf ~/.claude/skills/annotatable-html/assets/annotate.js . \
+     && ln -sf ~/.claude/skills/annotatable-html/assets/annotate-bridge.js . \
+     && cp ~/.claude/skills/annotatable-html/assets/open-docs.command.template "Open annotated docs (live).command" \
      && chmod +x "Open annotated docs (live).command"
    ```
 2. **Add the doc** — write two files into that folder:
@@ -81,17 +81,18 @@ Per doc the bridge keeps `<name>.sessions.json` (bridge-internal, don't hand-edi
 - **Every question names the linked folder's current path** (or says none is linked, so the model says "the doc doesn't cover that" instead of guessing). A thread session started before a relink still looks in the right place.
 - **Switching backend mid-thread** forks the other backend's base and replays the thread history in the prompt.
 - A stale session id self-heals: dropped, then re-forked/re-primed.
+- **Region boxes are sent as a picture.** A region anchor is only a box; without a picture the model sees just "region near <heading>" and guesses. When a box is drawn, the page calls `POST /__annot/snap`. The bridge opens the doc in a hidden Chrome (driven over `--remote-debugging-pipe`, no dependencies, `?az-snap` makes `annotate.js` stay off), lays it out in the same window size with the same rail push (docs that size things by window width wrap the same way), waits for the page height to settle, measures the box in pixels from the content's top using the content size saved with the anchor, and saves `.annot-snaps/<name>/<id>.png`. The card shows that picture in place of the label, and the model gets the same file: Claude is told to open it, Codex gets it via `--image=`. One picture per thread, reused for follow-ups; old region threads get one the first time the page shows them. Browser lookup: `ANNOT_CHROME` (if set, the only choice; `off` disables pictures), then Chrome / Chromium / Edge / Brave, then Playwright's Chromium cache. No browser or a failed picture → the question still goes out with the label only.
 - Codex runs `codex exec --json --ignore-user-config --ignore-rules --skip-git-repo-check` with a read-only sandbox (skipping the user's MCP/plugins cuts startup from ~8.5s to ~3s). Claude runs `claude -p --safe-mode --tools Read,Glob,Grep --output-format stream-json`.
 
 - `<name>.project.json` = `{ dir, git:{commonDir,branch,headSha}|null, linkedAt }` — set via `--link`, the 🔗 button, or `POST /__annot/set-project {base, dir}`. Changing it drops the cached base sessions so the next question re-primes.
-- Deleting a doc (🗑) also removes its `.sessions.json` and `.project.json`.
+- Deleting a doc (🗑) also removes its `.sessions.json`, `.project.json` and region pictures; deleting a thread removes its picture.
 
 **Worktree-aware linking.** `set-project` stores git identity (shared `.git` dir + branch) with the path. A moved/renamed worktree is found again via `git worktree list` and relinked silently ("(auto-relinked)" on the index card). A removed worktree or deleted repo is not relinked: the answer comes back with a `warning` the page toasts, and the index card shows "⚠ moved/missing — click 🔗 to relink".
 
 ## Concurrency and hardening
 
 - **Queues:** file writes for one doc (threads file, sessions, project) go through a per-doc queue; follow-ups in one thread go through a per-thread queue. Model calls for different threads — even in the same doc — run in parallel, capped across all docs by `ANNOT_MAX_CONCURRENT` (default 4).
-- **CSRF guard:** `/__annot/ask`, `prime`, `set-project`, `delete`, `delete-thread` reject a mismatched `Origin` header. Requests with no `Origin` (curl) are allowed.
+- **CSRF guard:** `/__annot/ask`, `prime`, `snap`, `set-project`, `delete`, `delete-thread` reject a mismatched `Origin` header. Requests with no `Origin` (curl) are allowed.
 - **Writes are atomic** (temp file + rename). If `<name>-threads.js` is not valid JS the bridge refuses to overwrite it.
 - **Page isolation:** the sidebar, dock, pins, region boxes, pill and toast live in a shadow root (`<az-annotate>`), so host CSS can't restyle them and their CSS can't touch the host. The only things put into the host page are `<mark class="az-hl">` text wraps and an outline class on element anchors, both reset with `!important`. The rail pushes the page via `padding-right` on `<html>` (not `<body>`), with no transition.
 - **Sidebar updates in place:** each card re-renders only when its own content changes, and the reply box is kept alive, so another thread's answer (or a filter click) never wipes a draft or the reader's selection. Drafts are saved per thread in localStorage. Selecting text in a card never opens it or scrolls the page.
@@ -107,7 +108,7 @@ The Copy button (and the bridge) produce a JSON array of `{ id, label, anchor, q
 window.ANNOTATE_THREADS = {
   "t8f3ab": {
     label: "…",
-    anchor: { type: "text", exact: "…", prefix: "…" },   // or region {x,y,w,h} / element {sel,tag,text}
+    anchor: { type: "text", exact: "…", prefix: "…" },   // or region {x,y,w,h,cw,ch,vw,vh,pad} / element {sel,tag,text}
     messages: [
       { role: "user",   text: "<their question>" },
       { role: "claude", text: "<your answer — plain English, concise, markdown OK>", by: "Claude · Sonnet" }   // `by` optional

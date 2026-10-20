@@ -16,6 +16,8 @@
  * reset with !important so host rules like `mark{padding}` can't restyle them.
  */
 (function () {
+  // ?az-snap: the bridge's hidden browser is taking a region picture — show the bare doc.
+  if (/[?&]az-snap\b/.test(location.search)) return;
   if (window.__azLoaded) return; window.__azLoaded = true;
 
   const CFG = Object.assign({
@@ -48,6 +50,7 @@
 
   let tool = 'select', locked = false, openId = null, filter = 'all';
   let BRIDGE = false, MODELS = null;
+  const shots = {};   // region picture state per thread: 'probe' | 'wait' | 'ok' | 'none'
   let choice = readLS(CHOICEKEY, null);          // { backend, model, effort } — shared by all docs
   const answering = {};                           // id -> { text, by } while an answer is in flight
 
@@ -105,7 +108,6 @@
   button,textarea{font:inherit;color:inherit;letter-spacing:normal;margin:0}
   button{cursor:pointer}
   .ic{display:inline-block;margin-right:6px}
-  .railtab .ic{margin:0 0 6px 0}
 
   .layer{position:absolute;top:0;left:0;width:0;height:0}
   .region{position:absolute;border:2px solid rgba(224,178,58,.75);background:rgba(224,178,58,.12);border-radius:6px;pointer-events:none}
@@ -117,17 +119,31 @@
   .pin.done{background:#3ecf7a;color:#04220f}
   .pin.focus,.pin:hover{outline:2px solid #fff;transform:scale(1.12)}
 
-  .dock{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2147483000;display:flex;align-items:center;gap:4px;
-    background:#161a21;border:1px solid #252b36;border-radius:14px;padding:6px;box-shadow:0 10px 34px rgba(0,0,0,.45);transition:left .2s ease}
-  .ui.railopen .dock{left:calc((100vw - ${RAIL_W}px) / 2)}
-  .master{display:flex;align-items:center;gap:7px;font-weight:600;font-size:13px;background:transparent;border:none;border-radius:9px;padding:7px 11px}
+  .dock{position:fixed;bottom:16px;right:16px;z-index:2147483000;display:flex;align-items:center;gap:2px;
+    background:#161a21;border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:3px;box-shadow:0 4px 14px rgba(0,0,0,.28);opacity:.7;transition:right .2s ease,opacity .15s}
+  .dock:hover,.ui.on .dock{opacity:1}
+  .ui.on .dock{border-radius:12px;padding:4px}
+  .ui.railopen .dock{right:${RAIL_W + 16}px}
+  @media (max-width:760px){.ui.railopen .dock{display:none}}
+  .master{width:30px;height:30px;display:flex;align-items:center;justify-content:center;font-size:15px;background:transparent;border:none;border-radius:999px;padding:0}
   .master:hover{background:#12161d}
-  .led{width:8px;height:8px;border-radius:50%;background:#3a4150}
-  .ui.on .led{background:#7c9cff;box-shadow:0 0 8px #7c9cff}
+  .master .ic{margin:0}
+  .ui.on .master{display:none}
+  .cnt{display:none;align-items:center;height:30px;font-weight:600;font-size:12px;color:#9aa3b2;background:transparent;border:none;border-radius:999px;padding:0 10px 0 2px;white-space:nowrap}
+  .cnt:hover{color:#e7e9ee}
+  .dock.has .cnt,.ui.on .cnt{display:inline-flex}
+  .cnt .cl{display:none}
+  .ui.on .cnt{height:32px;padding:0 10px;border-radius:9px;color:inherit}
+  .ui.on .cnt:hover{background:#12161d}
+  .ui.on .cnt .cl{display:inline;margin-right:5px}
+  .ui.on .cnt .n{color:#9aa3b2;font-weight:500}
+  .dock .offbtn{display:none}
+  .ui.on .dock .offbtn{display:flex}
+  .dock .master[data-tip]:hover::after,.dock .cnt[data-tip]:hover::after,.dock .offbtn[data-tip]:hover::after{left:auto;right:0;transform:none}
   .tools{display:none;align-items:center;gap:3px;padding-left:4px;margin-left:2px;border-left:1px solid #252b36}
   .ui.on .tools{display:flex}
-  .tool{position:relative;width:38px;height:38px;border-radius:9px;border:1px solid transparent;background:transparent;color:#9aa3b2;
-    font-size:17px;display:flex;align-items:center;justify-content:center;transition:background .1s,color .1s}
+  .tool{position:relative;width:32px;height:32px;border-radius:8px;border:1px solid transparent;background:transparent;color:#9aa3b2;
+    font-size:15px;display:flex;align-items:center;justify-content:center;transition:background .1s,color .1s}
   .tool:hover{background:#12161d;color:#e7e9ee}
   .tool.active{background:#7c9cff;color:#0b1020;border-color:#7c9cff}
   .tool .kbd{position:absolute;bottom:2px;right:3px;font-size:8.5px;opacity:.65}
@@ -144,9 +160,9 @@
   [data-tip]:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);white-space:nowrap;
     background:#000;color:#fff;font:500 11px ${FONT};padding:4px 8px;border-radius:6px;pointer-events:none}
 
-  .menu{position:fixed;bottom:76px;left:50%;transform:translateX(-50%);z-index:2147483002;width:300px;max-height:70vh;overflow:auto;display:none;
+  .menu{position:fixed;bottom:60px;right:16px;z-index:2147483002;width:300px;max-height:70vh;overflow:auto;display:none;
     background:#161a21;border:1px solid #252b36;border-radius:12px;padding:6px;box-shadow:0 14px 40px rgba(0,0,0,.5)}
-  .ui.railopen .menu{left:calc((100vw - ${RAIL_W}px) / 2)}
+  .ui.railopen .menu{right:${RAIL_W + 16}px}
   .menu.show{display:block}
   .menu h5{margin:8px 8px 4px;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;color:#9aa3b2;display:flex;gap:6px;align-items:center}
   .menu h5 small{font-weight:500;text-transform:none;letter-spacing:0;color:#6d7583}
@@ -197,6 +213,8 @@
   .collapse:hover{color:#e7e9ee;background:#12161d}
   .lbl{font-size:13px;color:#d4d8e2;line-height:1.45;font-style:italic;overflow-wrap:anywhere}
   .card.active .lbl{cursor:pointer}
+  .shot{display:block;max-width:100%;max-height:180px;border-radius:7px;border:1px solid #2a3140;background:#fff}
+  .lbl.pic{font-style:normal}
   .card.active .lbl:hover{color:#fff;text-decoration:underline dotted #9aa3b2}
   .q{font-size:12.5px;color:#9aa3b2;margin-top:5px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere}
   .empty{color:#9aa3b2;font-size:13px;line-height:1.6;padding:22px 18px}
@@ -221,8 +239,17 @@
   .bubble code{font-family:${MONO};font-size:12px;background:#0b0e13;border:1px solid #252b36;border-radius:5px;padding:0 4px;
     white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;-webkit-box-decoration-break:clone;box-decoration-break:clone;letter-spacing:0}
   .bubble pre{font-family:${MONO};font-size:12px;background:#0b0e13;border:1px solid #252b36;border-radius:8px;padding:9px 11px;margin:6px 0;
-    white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}
-  .bubble pre code{background:none;border:none;padding:0}
+    white-space:pre;overflow-wrap:normal;overflow-x:auto;max-width:100%;line-height:1.5}
+  .bubble pre code{background:none;border:none;padding:0;white-space:pre;overflow-wrap:normal;word-break:normal}
+  .bubble pre code.hljs{background:none;padding:0;color:#d6dbe6}
+  .bubble .katex{font-size:1.05em;color:#e7e9ee}
+  .bubble .katex-display{margin:6px 0;overflow-x:auto;overflow-y:hidden;padding:2px 0}
+  .bubble .tex{font-family:${MONO};font-size:12px;color:#c9d3ff}
+  .bubble .tex.disp{display:block;margin:6px 0;white-space:pre-wrap}
+  .bubble .tbl{overflow-x:auto;margin:6px 0}
+  .bubble table{border-collapse:collapse;font-size:12.5px;width:100%}
+  .bubble th,.bubble td{border:1px solid #252b36;padding:4px 7px;text-align:left;vertical-align:top}
+  .bubble th{background:#12161d;color:#fff;font-weight:600}
   .bubble a{color:#7c9cff;overflow-wrap:anywhere}
   .skel{display:flex;flex-direction:column;gap:6px;background:#0f1319;border-radius:10px;padding:9px 11px;border:1px solid #252b36}
   .skline{height:9px;border-radius:5px;width:100%;background:linear-gradient(90deg,#161a21 25%,#1d222b 37%,#161a21 63%);background-size:400% 100%;animation:shimmer 1.4s ease infinite}
@@ -241,10 +268,6 @@
   .btn.danger:hover{border-color:#e5484d;color:#ff6b6f}
   .btn.ghost{background:transparent}
 
-  .railtab{position:fixed;right:0;top:88px;z-index:2147482999;background:#161a21;border:1px solid #252b36;border-right:none;border-radius:10px 0 0 10px;
-    font-weight:600;font-size:12px;padding:9px 10px;writing-mode:vertical-rl;display:flex;align-items:center;gap:6px}
-  .ui.railopen .railtab{display:none}
-  .railtab .n{background:#7c9cff;color:#0b1020;border-radius:999px;padding:1px 6px;font-size:10px;writing-mode:horizontal-tb}
 
   .toast{position:fixed;top:16px;left:50%;transform:translate(-50%,-6px);background:#e7e9ee;color:#0f1115;font-weight:600;font-size:12.5px;
     padding:9px 15px;border-radius:10px;opacity:0;transition:opacity .18s,transform .18s;pointer-events:none;z-index:2147483003;max-width:80vw}
@@ -260,7 +283,6 @@
   root.innerHTML = `<style>${UI_STYLE}</style>
   <div class="layer" id="layer"><div class="band" id="band"></div></div>
   <div class="ui" id="ui">
-    <button class="railtab" id="railtab"><span class="ic">💬</span>Threads <span class="n" id="tabn">0</span></button>
     <aside class="rail" id="rail">
       <header><b><span class="ic">💬</span>Threads</b><span class="live">· ⚡ live</span><button class="x" id="closeRail" title="Close">✕</button></header>
       <div class="filters">
@@ -272,7 +294,7 @@
       <footer><button class="btn primary" id="copyBtn"><span class="ic">📋</span>Copy questions for Claude</button></footer>
     </aside>
     <div class="dock" id="dock">
-      <button class="master" id="master"><span class="led"></span><span class="ic">💬</span>Annotate</button>
+      <button class="master" id="master" data-tip="Annotate" aria-label="Annotate"><span class="ic">💬</span></button>
       <div class="tools">
         <button class="tool active" data-tool="select" data-tip="Read / select — V">↖<span class="kbd">V</span></button>
         <button class="tool" data-tool="region" data-tip="Region box — R">▭<span class="kbd">R</span></button>
@@ -280,8 +302,9 @@
         <button class="tool lock" id="lock" data-tip="Tool lock — place many">🔒</button>
         <span class="div"></span>
         <button class="txt modelbtn" id="modelBtn" data-tip="Who answers"><span class="dot"></span><span id="modelName">Model</span></button>
-        <button class="txt" id="dockThreads">Threads<span class="n" id="dockn">0</span></button>
       </div>
+      <button class="cnt" id="dockThreads" data-tip="Threads"><span class="cl">Threads</span><span class="n" id="dockn">0</span></button>
+      <button class="tool offbtn" id="offBtn" data-tip="Turn off" aria-label="Turn off annotating">✕</button>
     </div>
     <div class="menu" id="menu"></div>
     <div class="badge" id="badge"></div>
@@ -306,24 +329,96 @@
       .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
     return s.replace(/\u0000(\d+)\u0000/g, (_, i) => '<code>' + codes[i] + '</code>');
   }
+  /* Rich answers: math via KaTeX, code via highlight.js — both loaded from a CDN only when an
+     answer needs them. Offline (or a strict CSP), math stays as readable TeX and code stays plain. */
+  const KATEX = 'https://cdn.jsdelivr.net/npm/katex@0.16.47/dist/', HLJS = 'https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.12.0/';
+  const libs = {};   // name -> 'loading' | 'ok' | 'fail'
+  function addCss(href, where) { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = href; where.appendChild(l); }
+  // Only the @font-face rules go in the page head: the full sheet would restyle the doc's own math.
+  function addFonts(href) {
+    const dir = href.slice(0, href.lastIndexOf('/') + 1);
+    fetch(href).then(r => r.ok ? r.text() : '').then(t => {
+      const faces = (t.match(/@font-face\s*\{[^}]*\}/g) || []).join('\n').replace(/url\((['"]?)(?![a-z]+:)/gi, 'url($1' + dir);
+      if (!faces) return;
+      const s = document.createElement('style'); s.setAttribute('data-az-fonts', href); s.textContent = faces; document.head.appendChild(s);
+    }).catch(() => {});
+  }
+  function loadLib(name, test, js, css) {
+    if (test()) return true;
+    if (libs[name]) return false;
+    libs[name] = 'loading';
+    // CSS goes in the shadow root; for KaTeX its fonts also go in the page head (fonts don't load from a shadow root).
+    css.forEach(([href, fonts]) => { addCss(href, root); if (fonts && !document.querySelector('style[data-az-fonts="' + href + '"]')) addFonts(href); });
+    const sc = document.createElement('script'); sc.src = js; sc.async = true;
+    sc.onload = () => { libs[name] = test() ? 'ok' : 'fail'; refreshCards(); };
+    sc.onerror = () => { libs[name] = 'fail'; };
+    document.head.appendChild(sc);
+    return false;
+  }
+  const katexReady = () => loadLib('katex', () => !!(window.katex && window.katex.renderToString), KATEX + 'katex.min.js', [[KATEX + 'katex.min.css', true]]);
+  const hljsReady = () => loadLib('hljs', () => !!(window.hljs && window.hljs.highlightElement), HLJS + 'highlight.min.js', [[HLJS + 'styles/github-dark.min.css', false]]);
+  function refreshCards() { for (const c of cards.values()) c.sig = null; renderRail(); if (openId) updateStream(openId); }
+  function renderTex(tex, display, raw) {
+    if (katexReady()) { try { return window.katex.renderToString(tex, { displayMode: display, throwOnError: false, output: 'htmlAndMathml' }); } catch (e) {} }
+    return '<span class="tex' + (display ? ' disp' : '') + '">' + esc(raw) + '</span>';
+  }
+  // Pull math out before markdown runs, so `_`, `*` and `\` inside formulas survive. Code spans stay literal.
+  function stashMath(text, maths) {
+    const codes = [];
+    text = text.replace(/`[^`\n]+`/g, c => { codes.push(c); return '\u0002' + (codes.length - 1) + '\u0002'; });
+    const put = (raw, tex, display) => { maths.push(renderTex(tex.trim(), display, raw)); return '\u0001' + (maths.length - 1) + '\u0001'; };
+    text = text
+      .replace(/\$\$([\s\S]+?)\$\$/g, (r, t) => put(r, t, true))
+      .replace(/\\\[([\s\S]+?)\\\]/g, (r, t) => put(r, t, true))
+      .replace(/\\\(([\s\S]+?)\\\)/g, (r, t) => put(r, t, false))
+      // $x$ — not "$5 and $10": no space just inside either $, no digit right after the closing $.
+      .replace(/(^|[^\\$\w])\$(?!\s)([^$\n]+?)(?<!\s)\$(?![\w$])/g, (r, pre, t) => pre + put(r.slice(pre.length), t, false));
+    return text.replace(/\u0002(\d+)\u0002/g, (_, i) => codes[i]);
+  }
   function md(src) {
-    const lines = esc(src || '').split(/\r?\n/);
-    let html = '', inUL = false, inOL = false, para = [], fence = false, code = [];
+    // Math is stashed per run of non-code lines (display math may span lines).
+    const maths = [], out = [];
+    let chunk = [], inFence = false;
+    for (const raw of String(src || '').split(/\r?\n/)) {
+      if (/^```/.test(raw.trim())) { if (!inFence) { out.push(stashMath(chunk.join('\n'), maths)); chunk = []; } out.push(raw); inFence = !inFence; continue; }
+      (inFence ? out : chunk).push(raw);
+    }
+    if (chunk.length) out.push(stashMath(chunk.join('\n'), maths));
+    const lines = esc(out.join('\n')).split('\n');
+    let html = '', inUL = false, inOL = false, para = [], fence = null, code = [];
     const closeLists = () => { if (inUL) { html += '</ul>'; inUL = false; } if (inOL) { html += '</ol>'; inOL = false; } };
     const flush = () => { if (para.length) { html += '<p>' + inlineMd(para.join('<br>')) + '</p>'; para = []; } };
-    for (const raw of lines) {
-      if (/^```/.test(raw.trim())) { if (fence) { html += '<pre><code>' + code.join('\n') + '</code></pre>'; code = []; fence = false; } else { flush(); closeLists(); fence = true; } continue; }
-      if (fence) { code.push(raw); continue; }
+    const codeBlock = () => '<pre><code' + (fence ? ' class="language-' + fence + '"' : '') + '>' + code.join('\n') + '</code></pre>';
+    const cells = l => l.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => inlineMd(c.trim()));
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i];
+      const f = raw.trim().match(/^```\s*([\w+#.-]*)/);
+      if (f) { if (fence !== null) { html += codeBlock(); code = []; fence = null; } else { flush(); closeLists(); fence = f[1].toLowerCase(); } continue; }
+      if (fence !== null) { code.push(raw); continue; }
       const line = raw.trim(); let m;
       if (!line) { flush(); continue; }
+      // Table: a |row| followed by a |---|---| separator.
+      if (/^\|.*\|$/.test(line) && /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/.test((lines[i + 1] || '').trim())) {
+        flush(); closeLists();
+        html += '<div class="tbl"><table><thead><tr>' + cells(line).map(c => '<th>' + c + '</th>').join('') + '</tr></thead><tbody>';
+        i += 2;
+        for (; i < lines.length && /^\|.*\|$/.test(lines[i].trim()); i++) html += '<tr>' + cells(lines[i].trim()).map(c => '<td>' + c + '</td>').join('') + '</tr>';
+        i--; html += '</tbody></table></div>'; continue;
+      }
       if ((m = line.match(/^#{1,4}\s+(.*)$/))) { flush(); closeLists(); html += '<h4>' + inlineMd(m[1]) + '</h4>'; continue; }
       if ((m = line.match(/^(\d+)[.)]\s+(.*)$/))) { flush(); if (inUL) { html += '</ul>'; inUL = false; } if (!inOL) { html += '<ol>'; inOL = true; } html += '<li>' + inlineMd(m[2]) + '</li>'; continue; }
       if ((m = line.match(/^[-*]\s+(.*)$/))) { flush(); if (inOL) { html += '</ol>'; inOL = false; } if (!inUL) { html += '<ul>'; inUL = true; } html += '<li>' + inlineMd(m[1]) + '</li>'; continue; }
       closeLists(); para.push(line);
     }
-    if (fence) html += '<pre><code>' + code.join('\n') + '</code></pre>';
+    if (fence !== null) html += codeBlock();
     flush(); closeLists();
-    return html;
+    return html.replace(/\u0001(\d+)\u0001/g, (_, i) => maths[i]);
+  }
+  // Colors code blocks after they are in the DOM (highlight.js works on elements).
+  function highlightIn(el) {
+    const blocks = el.querySelectorAll('pre code:not(.hljs)');
+    if (!blocks.length || !hljsReady()) return;
+    blocks.forEach(b => { try { window.hljs.highlightElement(b); } catch (e) {} });
   }
 
   /* ===================== text anchoring ===================== */
@@ -514,7 +609,7 @@
   function whoLabel(m) { return m.role === 'user' ? 'You' : (m.by || 'Claude'); }
   function cardSig(id) {
     const t = threads[id], a = answering[id];
-    return [stateOf(t), id === openId, t.label, t.messages.length, t.messages.map(m => (m.text || '').length + (m.by || '')).join(','), a ? 'busy' : ''].join('|');
+    return [stateOf(t), id === openId, t.label, shots[id], t.messages.length, t.messages.map(m => (m.text || '').length + (m.by || '')).join(','), a ? 'busy' : ''].join('|');
   }
   function composerFor(id) {
     const wrap = document.createElement('div'); wrap.className = 'compose';
@@ -558,7 +653,9 @@
     const badge = busy ? '<span class="st busy">Answering…</span>' : s === 'hl' ? '' : '<span class="st ' + (s === 'done' ? 'doneb' : 'open') + '">' + (s === 'done' ? 'Answered' : 'Open') + '</span>';
     let html = '<div class="top"><span class="type">' + (TYPE[t.type] || t.type) + '</span>' + badge
       + (open ? '<button class="collapse" data-collapse title="Collapse">▾</button>' : '') + '</div>'
-      + '<div class="lbl" title="' + (open ? 'Show in page' : '') + '">“' + esc(t.label) + '”</div>';
+      + (shots[id] === 'ok'   // region with a picture: show what the model sees, not the heading guess
+        ? '<div class="lbl pic" title="' + (open ? 'Show in page' : '') + '"><img class="shot" alt="Picture of the boxed area" src="' + esc(shotUrl(id)) + '"></div>'
+        : '<div class="lbl" title="' + (open ? 'Show in page' : '') + '">“' + esc(t.label) + '”' + (shots[id] === 'wait' ? ' · taking picture…' : '') + '</div>');
     if (open) {
       html += '<div class="msgs">';
       t.messages.forEach(m => { html += '<div class="msg ' + (m.role === 'user' ? 'user' : 'claude') + '"><span class="who">' + esc(whoLabel(m)) + '</span><div class="bubble">' + md(m.text) + '</div></div>'; });
@@ -569,6 +666,7 @@
       if (q) html += '<div class="q">' + esc(q) + '</div>';
     }
     c.el.innerHTML = html;
+    highlightIn(c.el);
     if (open) {
       c.el.appendChild(composer);
       c.el.querySelector('[data-collapse]').onclick = e => { e.stopPropagation(); closeThread(); };
@@ -582,17 +680,36 @@
     let b = s.querySelector('.bubble');
     if (!b) { const sk = s.querySelector('.skel'); b = document.createElement('div'); b.className = 'bubble'; sk ? sk.replaceWith(b) : s.appendChild(b); }
     b.innerHTML = md(a.text);
+    highlightIn(b);
+  }
+  /* Region pictures: the bridge saves a picture of each box (the same one the model gets), and
+     the card shows it. Old region threads get one the first time the page sees them. */
+  function shotUrl(id) { return '/.annot-snaps/' + encodeURIComponent(baseName()) + '/' + id + '.png'; }
+  function ensureShot(id) {
+    const t = threads[id];
+    if (!BRIDGE || !t || t.type !== 'region' || shots[id]) return;
+    shots[id] = 'probe';
+    const done = v => { shots[id] = v; renderRail(); };
+    const img = new Image();
+    img.onload = () => done('ok');
+    img.onerror = () => {
+      done('wait');
+      fetch('/__annot/snap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base: baseName(), id, anchor: t.anchor, view: viewSize() }) })
+        .then(r => r.json()).then(j => done(j && j.ok ? 'ok' : 'none'), () => done('none'));
+    };
+    img.src = shotUrl(id);
   }
   function renderRail() {
     const ids = order.filter(id => threads[id]).concat(Object.keys(threads).filter(id => !order.includes(id)));
-    $('tabn').textContent = $('dockn').textContent = ids.length;
+    ids.forEach(ensureShot);
+    $('dockn').textContent = ids.length; $('dock').classList.toggle('has', ids.length > 0);
     let openCount = 0, doneCount = 0;
     ids.forEach(id => { if (stateOf(threads[id]) === 'done') doneCount++; else openCount++; });
     $('cAll').textContent = ids.length; $('cOpen').textContent = openCount; $('cDone').textContent = doneCount;
     const shown = ids.filter(id => { const s = stateOf(threads[id]); return filter === 'all' || (filter === 'open' ? s !== 'done' : s === 'done'); });
     const empty = $('empty');
     empty.style.display = shown.length ? 'none' : '';
-    if (!ids.length) empty.innerHTML = '<b>No annotations yet.</b><br><br>Turn on <b>Annotate</b>, then:<br>• <b>Select text</b> → Comment pill appears<br>• <kbd>R</kbd> → drag a box over anything<br>• <kbd>E</kbd> → click a whole block';
+    if (!ids.length) empty.innerHTML = '<b>No annotations yet.</b><br><br>Click <b>💬</b> (bottom right) to turn on annotating, then:<br>• <b>Select text</b> → Comment pill appears<br>• <kbd>R</kbd> → drag a box over anything<br>• <kbd>E</kbd> → click a whole block';
     else if (!shown.length) empty.textContent = 'Nothing in this filter.';
     const want = new Set(shown);
     for (const [id, c] of cards) if (!want.has(id)) { c.el.remove(); cards.delete(id); }
@@ -690,9 +807,14 @@
     if (!dragging) return; const box = dragging.box; dragging = null; band.style.display = 'none';
     if (!box || box.w < 12 || box.h < 12) return;
     const id = uid(), W = content.offsetWidth, H = content.offsetHeight;
-    threads[id] = { type: 'region', anchor: { type: 'region', x: box.l / W, y: box.t / H, w: box.w / W, h: box.h / H }, label: 'region near ' + nearestHeading(box.t), messages: [] };
+    // vw/vh/pad: the window the box was drawn in; cw/ch: the content size then. The bridge uses
+    // both to re-render the same spot for a picture, even if the page height later shifts a little.
+    threads[id] = { type: 'region', anchor: Object.assign({ type: 'region', x: box.l / W, y: box.t / H, w: box.w / W, h: box.h / H, cw: W, ch: H }, viewSize()), label: 'region near ' + nearestHeading(box.t), messages: [] };
     persist(); layoutPins(); renderRail(); openThread(id); if (!locked) setTool('select');
   });
+  // Window size plus the rail's push (padding-right on <html>), so the bridge can lay the page out
+  // the same way: docs that size things by window width (vw units) wrap differently otherwise.
+  function viewSize() { return { vw: HTML.clientWidth, vh: innerHeight, pad: Math.round(parseFloat(getComputedStyle(HTML).paddingRight) || 0) }; }
   function nearestHeading(topPx) {
     const cr = content.getBoundingClientRect(); let best = 'the page';
     content.querySelectorAll('h1,h2,h3').forEach(h => { if (h.getBoundingClientRect().top - cr.top <= topPx + 20) best = h.textContent; });
@@ -757,7 +879,7 @@
   });
 
   /* rail open/close + filters + copy */
-  $('railtab').onclick = () => { setRail(true); renderRail(); };
+  $('offBtn').onclick = () => setAnnot(false);
   $('dockThreads').onclick = () => { setRail(!ui.classList.contains('railopen')); renderRail(); };
   $('closeRail').onclick = () => setRail(false);
   root.querySelectorAll('.chip').forEach(c => c.onclick = () => { filter = c.dataset.filter; root.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === c)); renderRail(); });
@@ -866,6 +988,7 @@ ${JSON.stringify(batch, null, 2)}`;
     } catch (e) { return; }
     if (!BRIDGE) return;
     ui.classList.add('live');
+    renderRail();   // region cards can now fetch their pictures
     try { const r = await fetch('/__annot/models', { cache: 'no-store' }); if (r.ok) MODELS = await r.json(); } catch (e) {}
     if (MODELS && !validChoice(choice)) { choice = defaultChoice(); if (choice) writeLS(CHOICEKEY, choice); }
     paintModelBtn();
@@ -887,7 +1010,7 @@ ${JSON.stringify(batch, null, 2)}`;
     let final = null;
     try {
       const res = await fetch('/__annot/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ base: baseName(), id, label: t.label, anchor: t.anchor, questions, backend: choice && choice.backend, model: choice && choice.model, effort: choice && choice.effort, by, stream: true }) });
+        body: JSON.stringify({ base: baseName(), id, label: t.label, anchor: t.anchor, view: viewSize(), questions, backend: choice && choice.backend, model: choice && choice.model, effort: choice && choice.effort, by, stream: true }) });
       if (!res.ok || !res.body) throw new Error('bridge returned ' + res.status);
       const reader = res.body.getReader(), dec = new TextDecoder();
       let buf = '', raf = 0;

@@ -1,22 +1,22 @@
 # annotatable-html
 
-Turn any doc Claude writes you into a page you can talk back to. Select a sentence, box a diagram, or pick a block — a table, a paragraph, a node inside a Mermaid diagram — ask your question right on the spot, and the answer streams into a card beside it, kept there for next time. Answers come from Claude or Codex, whichever you pick. No API key, no server, no accounts; it runs on the [Claude Code](https://claude.com/claude-code) subscription (or Codex login) you already have.
+Turn any doc Claude writes you into a page you can talk back to. Select a sentence, box a diagram, or pick a block (a table, a paragraph, a node inside a Mermaid diagram), ask your question right on the spot, and the answer streams into a card beside it, kept there for next time. Answers come from Claude or Codex, whichever you pick. No API key, no server, no accounts; it runs on the [Claude Code](https://claude.com/claude-code) subscription (or Codex login) you already have.
 
 ![status: macOS · Chromium browsers](https://img.shields.io/badge/status-macOS%20%C2%B7%20Chromium-blue)
 
-You've hit this before: you ask Claude for a spec or an architecture write-up, get back a clean doc, and start reading — then the questions pile up. *Why base62 and not a UUID? What does "read-through cache" mean here? Is this number still right?* Today those questions go one of two places: into a separate chat where you re-paste the paragraph and re-explain what you meant, or nowhere at all. The doc can't answer, so it quietly becomes one more file you skimmed and never fully trusted.
+You've hit this before: you ask Claude for a spec or an architecture write-up, get back a clean doc, and start reading. Then the questions pile up. *Why base62 and not a UUID? What does "read-through cache" mean here? Is this number still right?* Today those questions go one of two places: into a separate chat where you re-paste the paragraph and re-explain what you meant, or nowhere at all. The doc can't answer, so it quietly becomes one more file you skimmed and never fully trusted.
 
-This keeps the question on the doc. You mark the exact spot that tripped you up, type what you want to know, and the answer lands right next to it — and it's still there tomorrow. A dead export turns into something you interrogate until you actually understand it.
+This keeps the question on the doc. You mark the exact spot that tripped you up, type what you want to know, and the answer lands right next to it, and it's still there tomorrow. A dead export turns into something you interrogate until you actually understand it.
 
 ![annotatable-html in action](docs/hero.png)
 
 *A generated doc with a highlighted sentence and its thread in the margin. Cards sit level with what they point at, glide out of each other's way, and stay on screen while you scroll past their text; every thread is also listed in the Comments panel.*
 
-And it rides the flow you already use — there's no new app to open:
+And it rides the flow you already use. There's no new app to open:
 
 1. **Ask** Claude Code for a doc, spec, or notes, and say "make it annotatable" (or add it to any HTML page you already have).
-2. **Read** it in your browser. When a question hits, mark the spot — select words and press **Comment**, press `R` to box part of a diagram, or `E` to pick a block (`↑` grows a cell to its row, then the whole table) — and type it. No context switch, no re-explaining.
-3. **Answer.** Answers arrive automatically through a local helper you start with one double-click — usually in 3–6 seconds, streaming in as they're written — or you paste one self-contained block into any chat. Pick the model in the comment box: Claude (Fable, Opus, Sonnet, Haiku) or Codex (the models your Codex account offers).
+2. **Read** it in your browser. When a question hits, mark the spot: select words and press **Comment**, press `R` to box part of a diagram, or `E` to pick a block (`↑` grows a cell to its row, then the whole table), and type it. No context switch, no re-explaining.
+3. **Answer.** Answers arrive automatically through a local helper you start with one double-click (usually in 3–6 seconds, streaming in as they're written), or you paste one self-contained block into any chat. Pick the model in the comment box: Claude (Fable, Opus, Sonnet, Haiku) or Codex (the models your Codex account offers).
 4. **Keep.** Every question and answer is saved in a plain file beside the doc, so it grows into a reference you trust instead of a snapshot you forget.
 
 Everything stays on your machine: draft questions live in the browser, answers in a `<doc>-threads.js` file you own. Nothing is uploaded.
@@ -42,9 +42,9 @@ That's it. It's opt-in: ask Claude Code to "make this annotatable", "add comment
 
 - **Claude Code** (this is a Claude Code skill).
 - **A Chromium browser** (Chrome/Edge/Arc/Brave) for the auto-answer launcher; any browser works for the copy-paste path.
-- **Node.js** — only for the optional auto-answer helper (`annotate-bridge.js`). The page itself needs nothing.
+- **Node.js**, only for the optional auto-answer helper (`annotate-bridge.js`). The page itself needs nothing.
 - The auto-answer helper uses `claude -p` on your **subscription** (no API key). It unsets `ANTHROPIC_API_KEY` for the child so it never bills the API.
-- **Codex CLI** (optional) — logged in, if you want Codex answers. The toolbar greys out whichever side isn't installed or logged in.
+- **Codex CLI** (optional), logged in, if you want Codex answers. The model picker greys out whichever side isn't installed or logged in.
 
 ## How it works
 

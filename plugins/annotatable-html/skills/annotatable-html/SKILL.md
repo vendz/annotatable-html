@@ -1,13 +1,13 @@
 ---
 name: annotatable-html
-description: An addon that adds pinned comment threads to any HTML page or site, new or existing. Use when the user asks for it, in words like "make this annotatable", "add annotations", "add comment threads", "let me comment on this page", or "let me ask questions on the page" — or on every HTML page you make when the user's own instructions (CLAUDE.md, AGENTS.md) make it the default. Without either, do not add it just because the output is a doc, spec, report, dashboard, diagram, or other HTML meant to be read.
+description: An addon that adds pinned comment threads to any HTML page or site, new or existing. Use when the user asks for it, in words like "make this annotatable", "add annotations", "add comment threads", "let me comment on this page", or "let me ask questions on the page", or on every HTML page you make when the user's own instructions (CLAUDE.md, AGENTS.md) make it the default. Without either, do not add it just because the output is a doc, spec, report, dashboard, diagram, or other HTML meant to be read.
 ---
 
 # Annotatable HTML
 
 ## Overview
 
-An addon that makes an HTML page **annotatable**: the user selects words, draws a box over a diagram, or picks a block (a paragraph, a table, a node inside a Mermaid or SVG diagram), asks a question, and Claude or Codex answers in a card beside it — a cross-session Q&A layer. No API key; an optional local helper (the bridge) makes answers automatic.
+An addon that makes an HTML page **annotatable**: the user selects words, draws a box over a diagram, or picks a block (a paragraph, a table, a node inside a Mermaid or SVG diagram), asks a question, and Claude or Codex answers in a card beside it: a cross-session Q&A layer. No API key; an optional local helper (the bridge) makes answers automatic.
 
 Version 2.0 looks and moves like the comments in claude.ai docs: margin cards next to what they point at, a Comments panel, a flat amber highlight, no pins or dock.
 
@@ -15,10 +15,10 @@ Version 2.0 looks and moves like the comments in claude.ai docs: margin cards ne
 
 ## When to use
 
-- The user says "make this annotatable", "add comment threads", "let me comment on it", "let me ask questions on the page", or names this feature — for a new page or an existing one.
-- The user's instructions make it the default — then add it to every new HTML page or site you make, without being asked.
+- The user says "make this annotatable", "add comment threads", "let me comment on it", "let me ask questions on the page", or names this feature, for a new page or an existing one.
+- The user's instructions make it the default: then add it to every new HTML page or site you make, without being asked.
 
-**When NOT to use:** any HTML the user did not ask to annotate and whose instructions do not make it the default, however doc-like it is. Also not on pages published to claude.ai — the local bridge cannot reach them.
+**When NOT to use:** any HTML the user did not ask to annotate and whose instructions do not make it the default, however doc-like it is. Also not on pages published to claude.ai, because the local bridge cannot reach them.
 
 ## Quick reference
 
@@ -40,9 +40,9 @@ Version 2.0 looks and moves like the comments in claude.ai docs: margin cards ne
 - Answer style: plain English, concise, no jargon, no file/function names unless the reader asks. The rules live in the bridge's answer prompt and in the Copy batch text.
 - Assets live in this skill's `assets/`: `annotate.js` (self-mounting engine), `annotate-bridge.js` (Node helper), `threads.template.js`, `open-docs.command.template` (shared launcher), `open-doc.command.template` (per-doc launcher).
 
-## How to implement (shared-folder model — the default)
+## How to implement (shared-folder model, the default)
 
-All annotated docs live in **one shared home: `~/annotated-docs/`**. The engine lives there **once** (symlinked to this skill's `assets/`, so it cannot go stale), with one bridge and one launcher. Per doc you add only two small files — no engine copies.
+All annotated docs live in **one shared home: `~/annotated-docs/`**. The engine lives there **once** (symlinked to this skill's `assets/`, so it cannot go stale), with one bridge and one launcher. Per doc you add only two small files, no engine copies.
 
 1. **Ensure the shared home exists** (create once; skip if present):
    ```bash
@@ -52,25 +52,25 @@ All annotated docs live in **one shared home: `~/annotated-docs/`**. The engine 
      && cp ~/.claude/skills/annotatable-html/assets/open-docs.command.template "Open annotated docs (live).command" \
      && chmod +x "Open annotated docs (live).command"
    ```
-2. **Add the doc** — write two files into that folder:
-   - `<name>.html` — **put the readable content inside a `<main>`** (or `<article>`, or an element with `class="wrap"`) so anchoring has a scope; end the body with the two scripts (**threads file FIRST**):
+2. **Add the doc**: write two files into that folder:
+   - `<name>.html`: **put the readable content inside a `<main>`** (or `<article>`, or an element with `class="wrap"`) so anchoring has a scope; end the body with the two scripts (**threads file FIRST**):
      ```html
      <main>… your content …</main>
      <script src="<name>-threads.js"></script>
      <script src="annotate.js"></script>
      ```
-     Wide tables and diagrams: wrap them in an element with `overflow-x:auto` so they scroll sideways; boxes drawn on them then scroll with them. For Mermaid, render with `flowchart: { useMaxWidth: false }` and don't put the diagram in a flex container that can shrink it — a squeezed diagram has unreadable labels.
-   - `<name>-threads.js` — copy `assets/threads.template.js` to this name. Only the `window.ANNOTATE_THREADS = {}` line matters.
+     Wide tables and diagrams: wrap them in an element with `overflow-x:auto` so they scroll sideways; boxes drawn on them then scroll with them. For Mermaid, render with `flowchart: { useMaxWidth: false }` and don't put the diagram in a flex container that can shrink it; a squeezed diagram has unreadable labels.
+   - `<name>-threads.js`: copy `assets/threads.template.js` to this name. Only the `window.ANNOTATE_THREADS = {}` line matters.
    The bridge auto-lists every `<name>.html` on its index; no per-doc launcher needed.
-3. **Link the doc to the folder it was built from — now, in this same step.** This is the most-skipped step, and skipping it is silent: an unlinked doc answers from its own text only, so questions the text doesn't cover get "the doc doesn't say".
+3. **Link the doc to the folder it was built from, now, in this same step.** This is the most-skipped step, and skipping it is silent: an unlinked doc answers from its own text only, so questions the text doesn't cover get "the doc doesn't say".
    - **Link whenever files on disk fed the doc:** a codebase, course slides or notebooks, an assignment, a writeup's working folder, notes, a scratch folder holding the chat's inputs. Use the folder you were working in (the repo root inside a git repo). No need to ask the user.
      ```bash
      node ~/annotated-docs/annotate-bridge.js --link ~/annotated-docs/<name>.html \
        "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
      ```
-     It works whether or not the bridge is running. It prints `✓ linked …` or `✗ link failed: …` and exits non-zero on failure — read the output.
+     It works whether or not the bridge is running. It prints `✓ linked …` or `✗ link failed: …` and exits non-zero on failure. Read the output.
    - **The doc describes a project you don't have open** (e.g. you're working directly in `~/annotated-docs`): ask the user for the path before finishing.
-   - **Skip only when nothing on disk fed the doc** — it came purely from the chat or your own knowledge.
+   - **Skip only when nothing on disk fed the doc**: it came purely from the chat or your own knowledge.
 4. **Anchoring is automatic:** the content scope is `main`, `article`, `.wrap`, else `<body>`. Picking works on paragraphs, headings, list items, table cells/rows/tables, figures, images, `[data-annot]`, `.node/.card/.step/.box`, and nodes inside SVG diagrams (Mermaid `g.node`, or the smallest group holding a shape and its label). Override via `window.ANNOTATE_CONFIG = { contentSelector, threadsVar, theme }` before `annotate.js`.
 5. **Launch it live (default):** run `node annotate-bridge.js "<name>.html"` inside `~/annotated-docs/` so it opens ready. Tell the user: **next time double-click `Open annotated docs (live).command`** → index of all docs → click one. Auto-answers use the user's Claude Code subscription via `claude -p` or their Codex login via `codex exec` (no API key; the CLI must be on PATH and logged in; the bridge unsets `ANTHROPIC_API_KEY` for the child). After changing `annotate-bridge.js`, restart the running bridge (it is a long-lived process).
 6. **Tell the user the loop:** select words → **Comment**, or `R` to box something, `E` to pick a block → type → the answer streams into the card. Opening the raw `file://` (no launcher) is copy-paste mode: questions are saved, the card says how to get an answer, and the Comments panel's `⋯` → **Copy questions** gives a block to paste into any chat (Claude writes the threads file → reload).
@@ -87,23 +87,23 @@ Per doc the bridge keeps `<name>.sessions.json` (bridge-internal, don't hand-edi
 - **Every question names the linked folder's current path** (or says none is linked).
 - **Switching backend mid-thread** forks the other backend's base and replays the thread history in the prompt.
 - A stale session id self-heals: dropped, then re-forked/re-primed.
-- **Boxes are sent as a picture.** The bridge opens the doc in a hidden Chrome (`?az-snap`, the engine stays off), lays it out at the same window size and page push, and — for a box drawn on a sideways-scrolling figure or table — scrolls that block to where it was (`&scroll=i:left`, from the anchor's `scroll` field). It saves `.annot-snaps/<name>/<id>.png`; the Comments panel shows it as the thread's quote, and the model gets the same file. Browser lookup: `ANNOT_CHROME` (if set, the only choice; `off` disables pictures), then Chrome / Chromium / Edge / Brave, then Playwright's Chromium cache. No browser → the question goes out with the label only.
+- **Boxes are sent as a picture.** The bridge opens the doc in a hidden Chrome (`?az-snap`, the engine stays off), lays it out at the same window size and page push, and (for a box drawn on a sideways-scrolling figure or table) scrolls that block to where it was (`&scroll=i:left`, from the anchor's `scroll` field). It saves `.annot-snaps/<name>/<id>.png`; the Comments panel shows it as the thread's quote, and the model gets the same file. Browser lookup: `ANNOT_CHROME` (if set, the only choice; `off` disables pictures), then Chrome / Chromium / Edge / Brave, then Playwright's Chromium cache. No browser → the question goes out with the label only.
 - Codex runs `codex exec --json --ignore-user-config --ignore-rules --skip-git-repo-check` with a read-only sandbox. Claude runs `claude -p --safe-mode --tools Read,Glob,Grep --output-format stream-json`.
 
-- `<name>.project.json` = `{ dir, git:{commonDir,branch,headSha}|null, linkedAt }` — set via `--link`, the 🔗 button on the docs index, or `POST /__annot/set-project {base, dir}`. Changing it drops the cached base sessions so the next question re-primes.
+- `<name>.project.json` = `{ dir, git:{commonDir,branch,headSha}|null, linkedAt }`, set via `--link`, the 🔗 button on the docs index, or `POST /__annot/set-project {base, dir}`. Changing it drops the cached base sessions so the next question re-primes.
 - Deleting a doc (🗑 on the index) also removes its `.sessions.json`, `.project.json` and pictures; deleting a resolved thread removes it from the threads file and its picture.
 
-**Worktree-aware linking.** `set-project` stores git identity (shared `.git` dir + branch) with the path. A moved/renamed worktree is found again via `git worktree list` and relinked silently. A removed worktree or deleted repo is not relinked: the answer comes back with a `warning` the page toasts, and the index card shows "⚠ moved/missing — click 🔗 to relink".
+**Worktree-aware linking.** `set-project` stores git identity (shared `.git` dir + branch) with the path. A moved/renamed worktree is found again via `git worktree list` and relinked silently. A removed worktree or deleted repo is not relinked: the answer comes back with a `warning` the page toasts, and the index card shows "⚠ moved/missing: … Click 🔗 to relink".
 
 ## Concurrency and hardening
 
 - **Queues:** file writes for one doc go through a per-doc queue; follow-ups in one thread go through a per-thread queue. Model calls for different threads run in parallel, capped across all docs by `ANNOT_MAX_CONCURRENT` (default 4).
 - **CSRF guard:** `/__annot/ask`, `prime`, `snap`, `set-project`, `delete`, `delete-thread` reject a mismatched `Origin` header. Requests with no `Origin` (curl) are allowed.
 - **Writes are atomic** (temp file + rename). If `<name>-threads.js` is not valid JS the bridge refuses to overwrite it.
-- **Page isolation:** the toolbar, cards, panel, menus and toast live in a shadow root (`<az-annotate>`). The host page gets only `<mark class="az-hl">` text wraps, `<az-box>` outlines for boxes and picked blocks (inside the scrolling block they belong to, `pointer-events:none` so scrolling over them works; clicks and hover find them by position), `padding-right` on `<html>`, and `position:relative` on a sideways-scrolling block that hosts a box — all with `!important` resets.
+- **Page isolation:** the toolbar, cards, panel, menus and toast live in a shadow root (`<az-annotate>`). The host page gets only `<mark class="az-hl">` text wraps, `<az-box>` outlines for boxes and picked blocks (inside the scrolling block they belong to, `pointer-events:none` so scrolling over them works; clicks and hover find them by position), `padding-right` on `<html>`, and `position:relative` on a sideways-scrolling block that hosts a box, all with `!important` resets.
 - **Cards update in place:** one element per thread, re-rendered only when its content changes; the reply box survives other threads' answers streaming in. Reply drafts are saved per thread in localStorage. A ResizeObserver re-spaces the column when a card grows (reply box opening, an answer arriving).
 - **Merging answers keeps waiting questions** and local details (message times, resolved state).
-- **Text anchors** store `prefix` and `suffix` and match with whitespace collapsed, picking the best-matching occurrence. Offsets are counted in the same text the index walks, which skips `<style>`/`<script>` — Mermaid SVGs carry a `<style>` block, and counting it shifted every selection below a diagram (selections came out empty).
+- **Text anchors** store `prefix` and `suffix` and match with whitespace collapsed, picking the best-matching occurrence. Offsets are counted in the same text the index walks, which skips `<style>`/`<script>`. Mermaid SVGs carry a `<style>` block, and counting it shifted every selection below a diagram (selections came out empty).
 - **Diagrams rendered after load** (Mermaid etc.): a MutationObserver re-anchors when an `<svg>` appears in the content.
 - **Deleting a thread** tombstones the id in localStorage (so the file can't resurrect it) and calls `POST /__annot/delete-thread`.
 
@@ -118,15 +118,15 @@ window.ANNOTATE_THREADS = {
     anchor: { type: "text", exact: "…", prefix: "…", suffix: "…" },   // or region {x,y,w,h,cw,ch,vw,vh,pad,els?,f?,m?,scroll?} / element {sel,tag,text}
     messages: [
       { role: "user",   text: "<their question>" },
-      { role: "claude", text: "<your answer — plain English, concise, markdown OK>", by: "Claude · Sonnet" }   // `by` optional
+      { role: "claude", text: "<your answer: plain English, concise, markdown OK>", by: "Claude · Sonnet" }   // `by` optional
     ]
   }
 };
 ```
 
-- Copy `id`, `label`, and `anchor` **verbatim** — that's how the page re-locates the mark.
-- **Append, don't replace** — a follow-up adds another user/claude pair to the same `id`'s `messages[]`.
-- Plain file edit — never commit/push unless asked.
+- Copy `id`, `label`, and `anchor` **verbatim**. That's how the page re-locates the mark.
+- **Append, don't replace**: a follow-up adds another user/claude pair to the same `id`'s `messages[]`.
+- Plain file edit. Never commit/push unless asked.
 - Threads files from 1.x load unchanged in 2.0.
 
 ## Common mistakes
@@ -154,4 +154,4 @@ window.ANNOTATE_THREADS = {
 
 ## Evolve this skill
 
-Treat this skill as living: **learn from how the user works across sessions and update yourself.** Whenever a session surfaces friction, a preference the user states, a better interaction, a bug in `annotate.js`/`annotate-bridge.js`, or a recurring request the current flow doesn't cover, improve the skill in place — edit the `assets/` files and this `SKILL.md` so the next use is better than the last. Keep the write-back contract and anchor schema backward-compatible (older `-threads.js` files must still load), verify changes in a browser before finishing, and briefly note what changed and why in your reply.
+Treat this skill as living: **learn from how the user works across sessions and update yourself.** Whenever a session surfaces friction, a preference the user states, a better interaction, a bug in `annotate.js`/`annotate-bridge.js`, or a recurring request the current flow doesn't cover, improve the skill in place: edit the `assets/` files and this `SKILL.md` so the next use is better than the last. Keep the write-back contract and anchor schema backward-compatible (older `-threads.js` files must still load), verify changes in a browser before finishing, and briefly note what changed and why in your reply.

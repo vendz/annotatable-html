@@ -1,11 +1,11 @@
 /*!
- * annotate.js 2.0 — drop-in comment layer for static HTML.
+ * annotate.js 2.0: drop-in comment layer for static HTML.
  * Select text, draw a box, or pick a block (a paragraph, a table, a node inside a diagram) → ask
  * Claude. Threads sit in margin cards beside what they point at, and in a Comments panel.
  * Answers come from "<name>-threads.js" (written by the optional annotate-bridge.js, or by pasting
  * the copied questions into any chat).
  *
- * USAGE — include AFTER a threads data file that defines window.ANNOTATE_THREADS:
+ * USAGE: include AFTER a threads data file that defines window.ANNOTATE_THREADS:
  *   <script src="myfile-threads.js"></script>
  *   <script src="annotate.js"></script>
  * Optional config BEFORE this script:
@@ -14,7 +14,7 @@
  * Isolation: every control lives in a shadow root (<az-annotate>), so host styles can't reach it
  * and its styles can't reach the host. Put into the host page: text <mark class="az-hl"> wraps,
  * <az-box> outlines for boxes and picked blocks, and a padding-right on <html> that makes room for
- * the margin cards — all reset with !important.
+ * the margin cards, all reset with !important.
  */
 (function () {
   'use strict';
@@ -36,7 +36,7 @@
   }
   function scrollerOf(el) { for (let e = el && el.parentElement; e && e !== content.parentElement; e = e.parentElement) if (e.nodeType === 1 && !(e instanceof SVGElement) && scrollsX(e)) return e; return null; }
 
-  // ?az-snap: the bridge's hidden browser is taking a region picture — show the bare doc, scrolled
+  // ?az-snap: the bridge's hidden browser is taking a region picture: show the bare doc, scrolled
   // the way the reader had it when the box was drawn (&scroll=i:left).
   if (/[?&]az-snap\b/.test(location.search)) {
     const sc = new URLSearchParams(location.search).get('scroll');
@@ -352,7 +352,7 @@
       .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
     return s.replace(/\u0000(\d+)\u0000/g, (_, i) => '<code>' + codes[i] + '</code>');
   }
-  /* Math via KaTeX, code via highlight.js — loaded from a CDN only when an answer needs them.
+  /* Math via KaTeX, code via highlight.js, loaded from a CDN only when an answer needs them.
      Offline, math stays as readable TeX and code stays plain. */
   const KATEX = 'https://cdn.jsdelivr.net/npm/katex@0.16.47/dist/', HLJS = 'https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.12.0/';
   const libs = {};
@@ -505,7 +505,7 @@
         if (end - start < middle.nodeValue.length) middle.splitText(end - start);
         if (!middle.nodeValue.trim()) return;
         const p = middle.parentNode;
-        // <mark> is HTML — inside SVG it is invalid and the label vanishes; skip non-HTML parents.
+        // <mark> is HTML; inside SVG it is invalid and the label vanishes; skip non-HTML parents.
         if (!p || p.namespaceURI !== 'http://www.w3.org/1999/xhtml' || /^(script|style|textarea|title)$/i.test(p.nodeName)) return;
         const mark = document.createElement('mark'); mark.className = 'az-hl'; mark.dataset.tid = id;
         p.insertBefore(mark, middle); mark.appendChild(middle);
@@ -695,8 +695,8 @@
   const CARD_W = 284, EDGE = 24, GAP = 32, PIN = 64;
   let railFits = false;
   const panelOpen = () => ui.classList.contains('panel-open');
-  // How far the page is pushed to make room for the cards depends only on the window — never on
-  // how many comments exist — so adding the first comment moves nothing.
+  // How far the page is pushed to make room for the cards depends only on the window, never on
+  // how many comments exist, so adding the first comment moves nothing.
   function measureRoom() {
     HTML.classList.remove('az-pad'); HTML.style.removeProperty('--az-pad');
     const W = HTML.clientWidth, cardX = W - CARD_W - EDGE;
@@ -1223,7 +1223,7 @@ answers into this file (create it if it does not exist):
 
 That file assigns a single global: window.${CFG.threadsVar} = { <id>: {...}, ... }
 Merge the entries below into it, keyed by "id". Rules:
-  • Keep each "label" and "anchor" EXACTLY as given — that is how the page re-locates the mark.
+  • Keep each "label" and "anchor" EXACTLY as given. That is how the page re-locates the mark.
   • "messages" is an ordered array. For each item, append {role:"user",text:<their question>}
     followed immediately by {role:"claude",text:<your answer>}. Preserve existing messages.
   • Write answers in plain English: short, direct, no jargon. Lead with the answer in one or two

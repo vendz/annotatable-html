@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 /*!
- * annotate-bridge.js — OPTIONAL local helper that removes the copy-paste step
+ * annotate-bridge.js: OPTIONAL local helper that removes the copy-paste step
  * for annotate.js pages. Zero dependencies (Node's http + fs + child_process).
  *
  * It does three things, all on your machine:
  *   1. Serves this folder over http://127.0.0.1:<port> (so the page can talk to it).
  *   2. Runs `claude -p` (your Claude Code subscription) or `codex exec` (your Codex login) to
  *      answer a question, streaming the answer text back to the page as it is written.
- *   3. Writes the finished answer into "<base>-threads.js" itself — the model only writes the
+ *   3. Writes the finished answer into "<base>-threads.js" itself; the model only writes the
  *      answer, it never reads or edits the threads file (that used to cost most of the time).
  *
  * USAGE:  cd into the folder that holds your .html doc, then:
  *           node annotate-bridge.js
- *         Open the printed URL (http://127.0.0.1:4317/<your>.html) — NOT file://.
+ *         Open the printed URL (http://127.0.0.1:4317/<your>.html), NOT file://.
  *         If the bridge isn't running, the page silently falls back to the
  *         self-contained "Copy questions for Claude" button.
  *
@@ -56,7 +56,7 @@ function withQueue(key, fn) {
   tail.then(() => { if (queues.get(key) === tail) queues.delete(key); });
   return next;
 }
-// Cross-doc concurrency cap — without it, many questions at once could spawn unbounded model
+// Cross-doc concurrency cap. Without it, many questions at once could spawn unbounded model
 // processes. Override with ANNOT_MAX_CONCURRENT.
 const MAX_CONCURRENT = Number(process.env.ANNOT_MAX_CONCURRENT) || 4;
 let activeSpawns = 0;
@@ -132,7 +132,7 @@ function claudeLoggedIn() {
   catch (e) { return false; }
 }
 function codexLoggedIn() {
-  // `codex login status` prints to stderr, not stdout — read both.
+  // `codex login status` prints to stderr, not stdout, so read both.
   const r = spawnSync('codex', ['login', 'status'], { env: childEnv(), timeout: 8000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const out = (r.stdout || '') + (r.stderr || '');
   return r.status === 0 && /logged in/i.test(out) && !/not logged in/i.test(out);
@@ -169,16 +169,16 @@ function normalizeChoice(j) {
 
 /*
  * Session architecture (why answers are fast and grounded without re-teaching from scratch):
- *   <base>.sessions.json — bridge-internal bookkeeping (not for the reader):
+ *   <base>.sessions.json: bridge-internal bookkeeping (not for the reader):
  *     { v:2, bases:{ claude:<id>, codex:<id> }, threads:{ <threadId>:{ backend, id } } }
  *     (an older { base:<id>, threads:{ <threadId>:<id> } } file is read as Claude sessions.)
  *     - A base session per backend is primed ONCE per doc with the doc + (if known) the source
- *       project's orientation — as soon as the page opens (/__annot/prime), not on first question.
+ *       project's orientation, as soon as the page opens (/__annot/prime), not on first question.
  *     - Each NEW thread forks from that base session, so it starts already grounded.
  *     - Each FOLLOW-UP resumes that thread's own session, so only the new question is sent.
  *     - Switching backend mid-thread forks the new backend's base and replays the thread history
  *       in the prompt (sessions can't move between Claude and Codex).
- *   <base>.project.json — optional, user-set: { dir, git:{commonDir,branch,headSha}|null, linkedAt }.
+ *   <base>.project.json: optional, user-set: { dir, git:{commonDir,branch,headSha}|null, linkedAt }.
  *     Added via --add-dir (Claude) so answers can check real code; Codex runs read-only and can
  *     read it directly. Set via the 🔗 button on the docs index (POST /__annot/set-project).
  */
@@ -195,13 +195,13 @@ function loadSessions(base) {
 function saveSessions(base, s) { writeJSON(sidecarPath(base, 'sessions'), s); }
 function updateSessions(base, fn) { return withQueue('doc:' + base, () => { const s = loadSessions(base); fn(s); saveSessions(base, s); return s; }); }
 
-// <base>-threads.js is JS, not JSON (unquoted keys, a header comment) — evaluate it in a throwaway
+// <base>-threads.js is JS, not JSON (unquoted keys, a header comment), so evaluate it in a throwaway
 // `window` to get the object back out, same trick the page itself uses.
 function threadsFilePath(base) { return path.join(ROOT, base + '-threads.js'); }
 function readThreadsFile(base) {
   let text; try { text = fs.readFileSync(threadsFilePath(base), 'utf8'); } catch (e) { return {}; }
   try { const win = {}; new Function('window', text)(win); return win.ANNOTATE_THREADS || {}; }
-  catch (e) { return null; }   // unreadable — callers must not overwrite it
+  catch (e) { return null; }   // unreadable: callers must not overwrite it
 }
 function writeThreadsFile(base, obj) {
   const file = threadsFilePath(base), tmp = file + '.tmp' + process.pid;
@@ -210,7 +210,7 @@ function writeThreadsFile(base, obj) {
 }
 const docExists = base => fs.existsSync(path.join(ROOT, base + '.html')) || fs.existsSync(path.join(ROOT, base + '.htm'));
 
-// Git identity of a directory, if it's inside a git repo (worktree or main checkout) — used to
+// Git identity of a directory, if it's inside a git repo (worktree or main checkout). Used to
 // relocate a moved/renamed worktree later. Returns null for a non-git (or no-longer-git) dir.
 function detectGit(dir) {
   const quiet = { timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] };   // a non-repo is normal, not an error to print
@@ -264,7 +264,7 @@ function linkProject(base, dir) {
   if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) throw new Error('not a directory: ' + abs);
   const git = detectGit(abs);
   writeJSON(sidecarPath(base, 'project'), { dir: abs, git, linkedAt: Date.now() });
-  // Grounding changed — drop primed base sessions so the next question re-primes.
+  // Grounding changed: drop primed base sessions so the next question re-primes.
   const s = loadSessions(base); s.bases = {}; saveSessions(base, s);
   return { dir: abs, git };
 }
@@ -284,7 +284,7 @@ function buildBasePrompt(base, projectDir) {
     `You are the standing Q&A assistant for the annotated doc "${doc}" in the folder ${ROOT}.`,
     projectDir ? `That doc was built from the folder "${projectDir}". Orient yourself there: first read its own instruction and status files if they exist (CLAUDE.md, AGENTS.md, STATUS.md, README), then skim its top-level layout. Do not paste file contents back.` : null,
     `Read "${doc}" now to orient yourself on its content and structure.`,
-    `Reply with one short line ("Ready.") once oriented — no summary. Readers will ask questions about this doc in later turns, each in its own thread. Re-read any file whenever you need exact specifics instead of relying on memory.`,
+    `Reply with one short line ("Ready.") once oriented, with no summary. Readers will ask questions about this doc in later turns, each in its own thread. Re-read any file whenever you need exact specifics instead of relying on memory.`,
     STYLE_RULES,
   ].filter(Boolean).join('\n\n');
 }
@@ -294,7 +294,7 @@ function buildThreadPrompt(base, item, opts) {
   if (opts.followup) parts.push(`Follow-up in the same thread about "${base}.html":`);
   else if (opts.snap) parts.push(`A reader drew a box on "${base}.html" and asked about what is inside it. The box is below the heading ${JSON.stringify(String(item.label || '').replace(/^region near /, ''))}.`);
   else parts.push(`A reader asked about this part of "${base}.html": ${JSON.stringify(item.label)}` + (item.anchor && item.anchor.type ? ` (a ${item.anchor.type} they marked).` : '.'));
-  if (opts.primed === false) parts.push(`The doc is "${path.join(ROOT, base + '.html')}" — read it before answering.`);
+  if (opts.primed === false) parts.push(`The doc is "${path.join(ROOT, base + '.html')}". Read it before answering.`);
   // Named on every turn: a resumed thread may predate a relink, and the standalone path has no prime.
   parts.push(opts.projectDir
     ? `The doc was built from the folder "${opts.projectDir}". When the doc alone does not settle the question, check that folder.`
@@ -304,8 +304,8 @@ function buildThreadPrompt(base, item, opts) {
     parts.push('Earlier in this thread:\n' + opts.history.map(m => (m.role === 'user' ? 'Reader: ' : 'You: ') + m.text).join('\n'));
   }
   parts.push('Question' + (item.questions.length > 1 ? 's' : '') + ':\n' + qs);
-  parts.push('Reply with ONLY the answer text (markdown is fine) — no preamble, and do not edit any files. ' + (item.questions.length > 1 ? 'Answer each question in order.' : ''));
-  parts.push(STYLE_RULES);   // every time — older sessions were primed before these rules existed
+  parts.push('Reply with ONLY the answer text (markdown is fine). No preamble, and do not edit any files. ' + (item.questions.length > 1 ? 'Answer each question in order.' : ''));
+  parts.push(STYLE_RULES);   // every time: older sessions were primed before these rules existed
   return parts.join('\n\n');
 }
 
@@ -388,7 +388,7 @@ function runModel(choice, opts) {
 }
 
 /* ---------------------------------- region pictures ---------------------------------- */
-// A region anchor is only a box in fractions of the content area — the model can't see what it
+// A region anchor is only a box in fractions of the content area, so the model can't see what it
 // covers. So the bridge opens the doc in a hidden Chrome (driven over --remote-debugging-pipe,
 // no dependencies), lays it out at the size the box was drawn at, and saves a picture of the box.
 const SNAP_DIR = path.join(ROOT, '.annot-snaps');
@@ -430,7 +430,7 @@ const CLIP_JS = a => `(() => {
   const r = el.getBoundingClientRect();
   return { x: r.left + el.clientLeft + scrollX + a.x * W, y: top(r), width: a.w * W, height: a.h * H, fits: a.h * H <= innerHeight - 20 };
 })()`;
-// Resolves the saved PNG path, or null (no browser, bad anchor, timeout) — the question then
+// Resolves the saved PNG path, or null (no browser, bad anchor, timeout); the question then
 // goes out without a picture, as before.
 // One picture per thread (follow-ups see what the reader saw); one hidden Chrome at a time.
 const snapping = new Map();
@@ -451,7 +451,7 @@ async function takeSnap(base, id, anchor, view, out) {
   const size = anchor.vw ? anchor : (view || {});
   const vw = Math.round(Number(size.vw) || 1280), vh = Math.round(Number(size.vh) || 900), pad = Math.max(0, Math.round(Number(size.pad) || 0));
   const bin = findBrowser();
-  if (!bin) { console.log(`  (${process.env.ANNOT_CHROME ? `ANNOT_CHROME="${process.env.ANNOT_CHROME}" is not a browser` : "no Chrome/Chromium found"} — ${base}#${id} asked without a picture)`); return null; }
+  if (!bin) { console.log(`  (${process.env.ANNOT_CHROME ? `ANNOT_CHROME="${process.env.ANNOT_CHROME}" is not a browser` : "no Chrome/Chromium found"}; ${base}#${id} asked without a picture)`); return null; }
   const prof = fs.mkdtempSync(path.join(os.tmpdir(), 'annot-snap-'));
   let proc;
   try {
@@ -507,7 +507,7 @@ async function takeSnap(base, id, anchor, view, out) {
     console.log(`  ▭ pictured ${base}#${id} (${Math.round(c.width)}×${Math.round(c.height)} at ${vw}px wide${pad ? `, rail ${pad}px` : ''})`);
     return out;
   } catch (e) {
-    console.log(`  (region picture failed for ${base}#${id}: ${e.message} — asked without it)`);
+    console.log(`  (region picture failed for ${base}#${id}: ${e.message}; asked without it)`);
     return null;
   } finally {
     if (proc.exitCode === null && proc.signalCode === null) {
@@ -544,7 +544,7 @@ function ensureBase(base, choice) {
 async function answerThread(base, item, choice, emit) {
   const proj = resolveProjectDir(base);
   const addDirs = [ROOT].concat(proj.dir ? [proj.dir] : []);
-  const warning = proj.stale ? `Linked project is missing (last seen at ${proj.lastKnownDir}) — answered without project context. Relink via 🔗 on the docs index.` : null;
+  const warning = proj.stale ? `Linked project is missing (last seen at ${proj.lastKnownDir}), so this was answered without project context. Relink via 🔗 on the docs index.` : null;
   const onDelta = t => emit({ t: 'delta', text: t }), onReset = () => emit({ t: 'reset' });
   const fileEntry = (readThreadsFile(base) || {})[item.id];
   const history = fileEntry && Array.isArray(fileEntry.messages) ? fileEntry.messages : [];
@@ -557,7 +557,7 @@ async function answerThread(base, item, choice, emit) {
   if (own && own.backend === choice.backend) {
     r = await runModel(choice, { prompt: buildThreadPrompt(base, item, { followup: true, primed: true, projectDir: proj.dir, snap }), resumeId: own.id, image, addDirs, onDelta, onReset });
     if (r.ok) sessionId = r.sessionId || own.id;
-    else { console.log(`↻ resume failed for ${base}#${item.id} (${r.error}) — starting a fresh thread session`); onReset(); }
+    else { console.log(`↻ resume failed for ${base}#${item.id} (${r.error}); starting a fresh thread session`); onReset(); }
   }
   if (!r || !r.ok) {
     // New thread, a backend switch, or a dead session: fork the doc's primed base session and
@@ -568,7 +568,7 @@ async function answerThread(base, item, choice, emit) {
       const tid = choice.backend === 'claude' ? crypto.randomUUID() : undefined;
       r = await runModel(choice, { prompt: prompt({ primed: true }), resumeId: baseId, fork: true, sessionId: tid, image, addDirs, onDelta, onReset });
       if (!r.ok) {
-        console.log(`↻ fork from base failed for ${base} (${r.error}) — re-priming`); onReset();
+        console.log(`↻ fork from base failed for ${base} (${r.error}); re-priming`); onReset();
         await updateSessions(base, s => { if (s.bases[choice.backend] === baseId) delete s.bases[choice.backend]; });
         baseId = await ensureBase(base, choice);
         if (baseId) r = await runModel(choice, { prompt: prompt({ primed: true }), resumeId: baseId, fork: true, sessionId: choice.backend === 'claude' ? crypto.randomUUID() : undefined, image, addDirs, onDelta, onReset });
@@ -581,9 +581,9 @@ async function answerThread(base, item, choice, emit) {
 
   // The bridge (not the model) writes the answer into the threads file, under the doc lock.
   const entry = await withQueue('doc:' + base, () => {
-    if (!docExists(base)) return null;   // doc deleted while answering — don't resurrect its files
+    if (!docExists(base)) return null;   // doc deleted while answering: don't resurrect its files
     const all = readThreadsFile(base);
-    if (all === null) throw new Error('threads file is not valid JS — not overwriting it');
+    if (all === null) throw new Error('threads file is not valid JS; not overwriting it');
     const e = all[item.id] || { label: item.label, anchor: item.anchor, messages: [] };
     if (!Array.isArray(e.messages)) e.messages = [];
     item.questions.forEach(q => e.messages.push({ role: 'user', text: q }));
@@ -717,7 +717,7 @@ function generateIndex() { // an auto-listing home page when the folder has no i
     if (linked && linked.dir) {
       const proj = resolveProjectDir(base);
       metaLine = proj.stale
-        ? `<small class="warn">⚠ moved/missing: ${esc2(proj.lastKnownDir)} — click 🔗 to relink</small>`
+        ? `<small class="warn">⚠ moved/missing: ${esc2(proj.lastKnownDir)}. Click 🔗 to relink</small>`
         : `<small>🔗 ${esc2(proj.dir)}${proj.relinked ? ' (auto-relinked)' : ''}</small>`;
     }
     return `<a class="c" href="/${encodeURIComponent(d.f)}">`
@@ -726,7 +726,7 @@ function generateIndex() { // an auto-listing home page when the folder has no i
       + `<button class="link" data-base="${esc2(base)}" title="Set/change the source project this doc documents">🔗</button>`
       + `<button class="del" data-base="${esc2(base)}" title="Delete this doc">🗑</button></span></a>`;
   }).join('');
-  const body = items.length ? `<div class="g">${cards}</div>` : `<p class="e">No docs here yet — ask Claude to make one in this folder.</p>`;
+  const body = items.length ? `<div class="g">${cards}</div>` : `<p class="e">No docs here yet. Ask Claude to make one in this folder.</p>`;
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Annotated docs</title>
 <style>body{margin:0;background:#0f1115;color:#e7e9ee;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 main{max-width:760px;margin:0 auto;padding:64px 40px}h1{font-size:30px;margin:0 0 4px;letter-spacing:-.3px}
@@ -742,7 +742,7 @@ main{max-width:760px;margin:0 auto;padding:64px 40px}h1{font-size:30px;margin:0 
 .link,.del{border:none;background:transparent;color:#9aa3b2;font-size:15px;cursor:pointer;padding:4px 6px;border-radius:6px;line-height:1}
 .link:hover{background:rgba(124,156,255,.14);color:#7c9cff}
 .del:hover{background:rgba(229,72,77,.14);color:#ff6b6f}</style></head>
-<body><main><h1>Annotated docs</h1><p class="sub">Click a doc to open it — annotate, ask, get answers inline.</p>${body}</main>
+<body><main><h1>Annotated docs</h1><p class="sub">Click a doc to open it, select something, ask, and the answer appears beside it.</p>${body}</main>
 <script>
 document.querySelectorAll('.link').forEach(btn => btn.addEventListener('click', e => {
   e.preventDefault(); e.stopPropagation();
@@ -751,7 +751,7 @@ document.querySelectorAll('.link').forEach(btn => btn.addEventListener('click', 
   if (!dir) return;
   fetch('/__annot/set-project', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base, dir }) })
     .then(r => r.json()).then(j => { if (j.ok) location.reload(); else alert('Failed: ' + (j.error || 'unknown error')); })
-    .catch(() => alert('Failed — is the bridge still running?'));
+    .catch(() => alert('Failed. Is the bridge still running?'));
 }));
 document.querySelectorAll('.del').forEach(btn => btn.addEventListener('click', e => {
   e.preventDefault(); e.stopPropagation();
@@ -759,7 +759,7 @@ document.querySelectorAll('.del').forEach(btn => btn.addEventListener('click', e
   if (!confirm('Delete "' + base + '"? This removes its HTML and threads file.')) return;
   fetch('/__annot/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base }) })
     .then(r => r.json()).then(j => { if (j.ok) btn.closest('.c').remove(); else alert('Delete failed: ' + (j.error || 'unknown error')); })
-    .catch(() => alert('Delete failed — is the bridge still running?'));
+    .catch(() => alert('Delete failed. Is the bridge still running?'));
 }));
 </script>
 </body></html>`;
@@ -792,7 +792,7 @@ function onListen(port) {
   SELF_ORIGIN = `http://127.0.0.1:${port}`;
   setImmediate(() => { const m = getModels(); console.log(`  Claude: ${m.claude.available ? 'ready' : m.claude.reason} · Codex: ${m.codex.available ? 'ready' : m.codex.reason}`); });
   const link = urlFor(port, argDoc() || '');   // a specific doc if passed, else the index
-  console.log(`\n  ✦ Annotate bridge is live — ${ROOT}`);
+  console.log(`\n  ✦ Annotate bridge is live: ${ROOT}`);
   console.log(`  Opening ${link}`);
   console.log(`  Mark + type a question → the answer appears automatically.`);
   console.log(`  Close this window to stop.\n`);
@@ -812,6 +812,6 @@ function runLinkCommand() {
 }
 if (LINK) runLinkCommand();
 else findPort(PREFERRED, sel => {
-  if (sel.ours) { console.log(`Bridge already running on ${sel.n} — opening…`); openBrowser(urlFor(sel.n, argDoc() || '')); process.exit(0); }
+  if (sel.ours) { console.log(`Bridge already running on ${sel.n}, opening…`); openBrowser(urlFor(sel.n, argDoc() || '')); process.exit(0); }
   server.listen(sel.n, '127.0.0.1', () => onListen(sel.n));
 });

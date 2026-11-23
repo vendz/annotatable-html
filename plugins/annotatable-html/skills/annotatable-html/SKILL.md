@@ -26,7 +26,7 @@ Version 2.0 looks and moves like the comments in claude.ai docs: margin cards ne
 |--------|-----------------------|--------------------------|
 | Text | select words → one **Comment** button | exact phrase + 32 chars either side |
 | Box (region) | **`R`** → drag a box over anything | the blocks it covers (edges saved relative to them), or its spot inside a sideways-scrolling figure/table, else content fractions; the bridge saves a picture of the box |
-| Block (element) | **`E`** → click; **↑/↓** grow or shrink (cell → row → table, node → diagram) | selector, then tag + text; falls back to the same position when the doc was rewritten |
+| Block (element) | **`E`** → click; **↑/↓** grow or shrink (cell → row → table, node → diagram) | selector, then tag + text; when the doc was rewritten, the block at the same position, and its card says the block's text has changed since the question was asked |
 
 - **Keys:** `V` select text · `R` draw a box · `E` pick a block · `↑/↓` bigger/smaller block while picking · `Esc` cancel/close · `Enter` send · `Shift+Enter` new line. The same modes are in the toolbar's mode menu (top right).
 - **Margin cards:** each open thread is a card in a column at the right edge, level with its anchor. The focused card slides 8px left, stays on screen while its anchor is on screen (cards below are pushed along, never overlapped), scrolls long threads inside itself with a **See more** pill, and shows a quiet **Reply…** field that grows and gets a focus ring when clicked. Resting cards are short faded previews. Cards are one element for their whole life, so they glide; nothing jumps or rebuilds.

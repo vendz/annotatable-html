@@ -598,6 +598,8 @@
   let active = null;                // focused thread id
   const boxes = {};                 // id -> <az-box> for region and element threads
   const targets = {};               // id -> element a picked block points at
+  const drifted = new Set();        // ids whose block was found by position only: its text changed since the question
+  const textDrifted = (el, a) => { const txt = normWS(a.text || '').trim(); return !!txt && !normWS(el.textContent || '').trim().startsWith(txt.slice(0, 40)); };
   function clearMarks() {
     const parents = new Set();
     content.querySelectorAll('mark.az-hl').forEach(m => { const p = m.parentNode; while (m.firstChild) p.insertBefore(m.firstChild, m); p.removeChild(m); parents.add(p); });
@@ -660,7 +662,7 @@
     for (const id in threads) {
       const t = threads[id]; if (t.type !== 'region' && t.type !== 'element') continue;
       let tg = null;
-      if (t.type === 'element') { tg = targets[id]; if (!tg || !tg.isConnected) tg = targets[id] = elFromAnchor(t.anchor || {}); if (!tg) continue; }
+      if (t.type === 'element') { tg = targets[id]; if (!tg || !tg.isConnected) { tg = targets[id] = elFromAnchor(t.anchor || {}); const was = drifted.has(id); if (tg && textDrifted(tg, t.anchor || {})) drifted.add(id); else drifted.delete(id); if (was !== drifted.has(id)) { const c = railEls.get(id), p = panelEls.get(id); if (c) c._h = null; if (p) p._h = null; } } if (!tg) continue; }
       const b = boxes[id] || (boxes[id] = Object.assign(document.createElement('az-box'), {}));
       b.dataset.tid = id;
       if (placeAnchorBox(b, t.anchor || {}, tg)) live.add(id);
@@ -724,7 +726,8 @@
   const timeStr = at => at ? new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
   function msgsHTML(id) {
     const t = threads[id]; if (!t) return '';
-    let h = t.messages.map((m, i) => {
+    let h = drifted.has(id) ? `<div class="msg"><div class="note">This block's text has changed since this was asked.</div></div>` : '';
+    h += t.messages.map((m, i) => {
       const isC = m.role !== 'user', w = isC ? author(m.by) : null;
       const acts = i !== 0 ? '' : t.resolved
         ? `<button class="ib" data-act="reopen" title="Reopen" aria-label="Reopen">${I.undo}</button><button class="ib" data-act="delete" title="Delete" aria-label="Delete">${I.trash}</button>`

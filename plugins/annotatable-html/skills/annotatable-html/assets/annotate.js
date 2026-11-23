@@ -1,70 +1,81 @@
 /*!
- * annotate.js — drop-in annotation layer for static HTML.
- * Select text, drag a region, or click an element → pin a Q&A thread that
- * lives in the browser. Answers come from "<name>-threads.js" (written by the
- * optional annotate-bridge.js, or by pasting the Copy batch into any chat).
+ * annotate.js 2.0 — drop-in comment layer for static HTML.
+ * Select text, draw a box, or pick a block (a paragraph, a table, a node inside a diagram) → ask
+ * Claude. Threads sit in margin cards beside what they point at, and in a Comments panel.
+ * Answers come from "<name>-threads.js" (written by the optional annotate-bridge.js, or by pasting
+ * the copied questions into any chat).
  *
  * USAGE — include AFTER a threads data file that defines window.ANNOTATE_THREADS:
  *   <script src="myfile-threads.js"></script>
  *   <script src="annotate.js"></script>
  * Optional config BEFORE this script:
- *   <script>window.ANNOTATE_CONFIG = { contentSelector:'main', threadsVar:'ANNOTATE_THREADS' }</script>
+ *   <script>window.ANNOTATE_CONFIG = { contentSelector:'main', threadsVar:'ANNOTATE_THREADS', theme:'auto' }</script>
  *
- * Isolation: every control (sidebar, dock, pins, pill, toast) lives in a shadow root, so host
- * styles can't reach it and its styles can't reach the host. The only things placed into the
- * host page are text <mark class="az-hl"> wraps and an outline class on element anchors, both
- * reset with !important so host rules like `mark{padding}` can't restyle them.
+ * Isolation: every control lives in a shadow root (<az-annotate>), so host styles can't reach it
+ * and its styles can't reach the host. Put into the host page: text <mark class="az-hl"> wraps,
+ * <az-box> outlines for boxes and picked blocks, and a padding-right on <html> that makes room for
+ * the margin cards — all reset with !important.
  */
 (function () {
-  // ?az-snap: the bridge's hidden browser is taking a region picture — show the bare doc.
-  if (/[?&]az-snap\b/.test(location.search)) return;
+  'use strict';
   if (window.__azLoaded) return; window.__azLoaded = true;
 
-  const CFG = Object.assign({
-    contentSelector: null,   // scope for text-select, region drag, pins (auto if null)
-    elementSelector: 'p,h1,h2,h3,h4,h5,li,pre,blockquote,img,figure,table,[data-annot],.node,.card,.step,.box,.prob',
-    threadsVar: 'ANNOTATE_THREADS',
-  }, window.ANNOTATE_CONFIG || {});
-
-  const content = (CFG.contentSelector && document.querySelector(CFG.contentSelector))
-    || document.querySelector('main,article,.wrap') || document.body;
+  const CFG = Object.assign({ contentSelector: null, threadsVar: 'ANNOTATE_THREADS', theme: 'auto' }, window.ANNOTATE_CONFIG || {});
   const HTML = document.documentElement;
-  // Rail width: drag its left edge to resize (double-click resets). Shared by all docs.
-  const RAIL_W = 380, RAIL_MIN = 300, RAILWKEY = 'annot::railw';
+  const findContent = () => (CFG.contentSelector && document.querySelector(CFG.contentSelector)) || document.querySelector('main,article,.wrap') || document.body;
+  let content = findContent();
+
+  /* Sideways-scrolling blocks inside the content (wide tables, figures). Listed in document order,
+     so the reader's page and the bridge's hidden browser agree on "scroller #i". */
+  const scrollsX = e => { const o = getComputedStyle(e).overflowX; return (o === 'auto' || o === 'scroll') && e.scrollWidth > e.clientWidth + 1; };
+  let scCache = null, scAt = 0;
+  function scrollers(fresh) {
+    if (!fresh && scCache && performance.now() - scAt < 400) return scCache;
+    const out = []; content.querySelectorAll('*').forEach(e => { if (!/^(az-annotate|az-box|svg|script|style)$/i.test(e.tagName) && !(e instanceof SVGElement) && scrollsX(e)) out.push(e); });
+    scCache = out; scAt = performance.now(); return out;
+  }
+  function scrollerOf(el) { for (let e = el && el.parentElement; e && e !== content.parentElement; e = e.parentElement) if (e.nodeType === 1 && !(e instanceof SVGElement) && scrollsX(e)) return e; return null; }
+
+  // ?az-snap: the bridge's hidden browser is taking a region picture — show the bare doc, scrolled
+  // the way the reader had it when the box was drawn (&scroll=i:left).
+  if (/[?&]az-snap\b/.test(location.search)) {
+    const sc = new URLSearchParams(location.search).get('scroll');
+    if (sc) {
+      const apply = () => { content = findContent(); const hs = scrollers(true); sc.split(',').forEach(p => { const [i, l] = p.split(':').map(Number); if (hs[i] && Number.isFinite(l)) hs[i].scrollLeft = l; }); };
+      const run = () => { apply(); [300, 900, 1800, 2700].forEach(t => setTimeout(apply, t)); };
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run); else run();
+    }
+    return;
+  }
 
   const KEY = 'annot::' + location.pathname;
   const DELKEY = KEY + '::del', DRAFTKEY = KEY + '::drafts', CHOICEKEY = 'annot::model';
   const ANSWERS = window[CFG.threadsVar] || {};
-  const ELIG = CFG.elementSelector;
+  const DRAFT = '__draft';
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const uid = () => 't' + Math.random().toString(36).slice(2, 8);
   const readLS = (k, fb) => { try { const v = JSON.parse(localStorage.getItem(k)); return v == null ? fb : v; } catch (e) { return fb; } };
   const writeLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+  const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const normWS = s => (s || '').replace(/\s+/g, ' ');
 
   let threads = readLS(KEY, {});
   const deletedIds = new Set(readLS(DELKEY, []));
   const drafts = readLS(DRAFTKEY, {});
-  function persist() { writeLS(KEY, threads); }
-  function persistDeleted() { writeLS(DELKEY, [...deletedIds]); }
-  function persistDrafts() { writeLS(DRAFTKEY, drafts); }
-
-  let tool = 'select', locked = false, openId = null, filter = 'all';
-  let BRIDGE = false, MODELS = null;
-  const shots = {};   // region picture state per thread: 'probe' | 'wait' | 'ok' | 'none'
-  let choice = readLS(CHOICEKEY, null);          // { backend, model, effort } — shared by all docs
-  const answering = {};                           // id -> { text, by } while an answer is in flight
+  const persist = () => writeLS(KEY, threads);
+  const persistDeleted = () => writeLS(DELKEY, [...deletedIds]);
+  const persistDrafts = () => writeLS(DRAFTKEY, drafts);
 
   /* Merge one entry from the threads file into local state. The file is the source of truth for
-     answered history, but questions typed here that the file doesn't have yet (still waiting for
-     an answer, or asked in copy-paste mode) must survive — a plain overwrite used to drop them
-     whenever any other thread's answer triggered a refetch. */
+     answered history; questions typed here that the file doesn't have yet survive, and local
+     details (times, resolved) are kept. */
   function mergeThread(id, A) {
     if (!A || deletedIds.has(id)) return;
-    const fileMsgs = (A.messages || []).slice();
+    const local = (threads[id] && threads[id].messages) || [];
+    const fileMsgs = (A.messages || []).map((m, i) => (local[i] && local[i].role === m.role && local[i].text === m.text && local[i].at) ? Object.assign({}, m, { at: local[i].at }) : Object.assign({}, m));
     const t = threads[id];
     if (!t) { threads[id] = { type: A.anchor && A.anchor.type, anchor: A.anchor, label: A.label, messages: fileMsgs }; return; }
-    const local = t.messages || [];
     let lastC = -1; local.forEach((m, i) => { if (m.role === 'claude') lastC = i; });
     const keep = [];
     for (let i = lastC + 1; i < local.length; i++) {
@@ -73,289 +84,280 @@
       keep.push(m);
     }
     t.messages = fileMsgs.concat(keep);
+    if (!t.type && A.anchor) t.type = A.anchor.type;
   }
   for (const id in ANSWERS) mergeThread(id, ANSWERS[id]);
+  for (const id in threads) if (!threads[id].type) threads[id].type = (threads[id].anchor && threads[id].anchor.type) || 'text';
   persist();
-
-  function stateOf(t) { if (t.messages.some(m => m.role === 'claude')) return 'done'; if (t.messages.some(m => m.role === 'user')) return 'open'; return 'hl'; }
   function pendingQuestions(t) {
     let lastC = -1; t.messages.forEach((m, i) => { if (m.role === 'claude') lastC = i; });
     return t.messages.slice(lastC + 1).filter(m => m.role === 'user').map(m => m.text);
   }
 
-  /* ======================= host-page styles (marks only) ======================= */
-  const PAGE_STYLE = `
-  mark.az-hl{all:unset;display:inline!important;background:rgba(224,178,58,.22)!important;box-shadow:inset 0 -2px 0 rgba(224,178,58,.75)!important;
-    border-radius:2px!important;padding:0!important;margin:0!important;color:inherit!important;font:inherit!important;cursor:pointer}
-  mark.az-hl.az-done{background:rgba(62,207,122,.2)!important;box-shadow:inset 0 -2px 0 rgba(62,207,122,.75)!important}
-  mark.az-hl.az-focus{background:rgba(124,156,255,.3)!important;box-shadow:inset 0 -2px 0 #7c9cff!important}
-  .az-el-mark{outline:2px solid rgba(224,178,58,.75)!important;outline-offset:3px!important}
-  .az-el-mark.az-done{outline-color:rgba(62,207,122,.75)!important}
-  .az-el-mark.az-focus{outline-color:#7c9cff!important}
-  html.az-element-mode .az-el-hover{outline:2px dashed #7c9cff!important;outline-offset:3px!important;cursor:pointer!important}
-  html.az-region-mode,html.az-region-mode *{cursor:crosshair!important;user-select:none!important;-webkit-user-select:none!important}
-  html.az-railopen{padding-right:var(--az-rail-w,${RAIL_W}px)!important}
-  @media (max-width:760px){html.az-railopen{padding-right:0!important}}
-  `;
-  const pageStyle = document.createElement('style'); pageStyle.textContent = PAGE_STYLE; document.head.appendChild(pageStyle);
+  /* ======================= host-page styles ======================= */
+  const EASE = 'cubic-bezier(.165,.84,.44,1)';
+  const pageStyle = document.createElement('style');
+  pageStyle.textContent = `
+  mark.az-hl{all:unset;display:inline!important;background:rgba(251,179,21,.22)!important;color:inherit!important;font:inherit!important;padding:0!important;margin:0!important;
+    border-radius:0!important;box-shadow:none!important;cursor:pointer;transition:background-color .2s ${EASE},box-shadow .2s ${EASE}!important}
+  mark.az-hl.az-on{background:rgba(251,179,21,.45)!important;box-shadow:inset 0 -2px 0 var(--az-edge,#e49c06)!important}
+  mark.az-hl.az-gone{background:transparent!important;box-shadow:none!important;cursor:text}
+  az-box{all:unset;position:absolute!important;display:block!important;box-sizing:border-box!important;pointer-events:none!important;border-radius:5px!important;
+    background:rgba(251,179,21,.18)!important;box-shadow:inset 0 0 0 1px var(--az-edge,#e49c06)!important;z-index:5!important;transition:opacity .2s,background-color .2s ${EASE}!important}
+  az-box.az-on{background:rgba(251,179,21,.26)!important;box-shadow:inset 0 0 0 2px var(--az-edge,#e49c06)!important}
+  az-box.az-gone{opacity:0!important}
+  html.az-mode-region,html.az-mode-region *{cursor:crosshair!important;user-select:none!important;-webkit-user-select:none!important}
+  html.az-pad{padding-right:var(--az-pad,0px)!important}
+  html.az-panel{padding-right:320px!important}
+  @media (max-width:700px){html.az-panel{padding-right:0!important}}`;
+  document.head.appendChild(pageStyle);
 
   /* ======================= shadow-root UI ======================= */
-  const FONT = '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif';
+  const SANS = 'ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif';
   const MONO = 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
   const UI_STYLE = `
-  :host{all:initial}
-  .ui,.layer{font-family:${FONT};font-size:13px;line-height:1.45;color:#e7e9ee;-webkit-font-smoothing:antialiased;letter-spacing:normal;text-transform:none}
-  *,*::before,*::after{box-sizing:border-box}
-  button,textarea{font:inherit;color:inherit;letter-spacing:normal;margin:0}
-  button{cursor:pointer}
-  .ic{display:inline-block;margin-right:6px}
+  .ui{--page:#fff;--surface:#fff;--popover:#fff;--t1:rgba(0,0,0,.9);--t2:rgba(0,0,0,.6);--t3:rgba(0,0,0,.47);
+    --ring:rgba(0,0,0,.08);--line:rgba(0,0,0,.08);--ghost:rgba(0,0,0,.05);--ghost-2:rgba(0,0,0,.1);--tint:rgba(0,0,0,.03);--field:rgba(0,0,0,.04);
+    --sh-sm:0 1px 2px rgba(11,11,11,.06),0 2px 8px rgba(0,0,0,.08);--sh-md:0 2px 4px rgba(11,11,11,.07),0 6px 16px rgba(0,0,0,.1);--sh-pop:0 8px 24px rgba(0,0,0,.12),0 2px 6px rgba(0,0,0,.08);
+    --accent:#257de0;--accent-text:#1757ac;--danger:#dc3c3d;--claude:#d97757;--you:#257de0;--code:rgba(0,0,0,.05);
+    --ease:${EASE};--snap:cubic-bezier(.32,.72,0,1);--spring:linear(0,.2459,.6526,.9468,1.0764,1.0915,1.0585,1.0219,.9993,.9914,.9921,.9957,.9988,1.0004,1);
+    font:14px/20px ${SANS};color:var(--t1);-webkit-font-smoothing:antialiased}
+  .ui[data-theme=dark]{--page:#0b0b0b;--surface:#1f1f1f;--popover:#303030;--t1:rgba(255,255,255,.93);--t2:rgba(255,255,255,.57);--t3:rgba(255,255,255,.4);
+    --ring:rgba(255,255,255,.04);--line:rgba(255,255,255,.07);--ghost:rgba(255,255,255,.075);--ghost-2:rgba(255,255,255,.15);--tint:rgba(255,255,255,.03);--field:rgba(255,255,255,.05);
+    --sh-sm:0 1px 2px rgba(11,11,11,.06),0 2px 8px rgba(0,0,0,.24);--sh-md:0 2px 4px rgba(11,11,11,.07),0 6px 16px rgba(0,0,0,.24);--sh-pop:0 8px 24px rgba(0,0,0,.32),0 2px 6px rgba(0,0,0,.2);
+    --accent-text:#6aabf1;--code:rgba(255,255,255,.07)}
+  *{box-sizing:border-box}
+  button{font:inherit;color:inherit}
+  svg{display:block}
+  .ib{all:unset;box-sizing:border-box;width:28px;height:28px;display:grid;place-items:center;border-radius:8px;color:var(--t2);cursor:pointer;
+    transition:background-color 60ms var(--ease),color 60ms,transform .45s var(--spring)}
+  .ib:hover{background:var(--ghost);color:var(--t1)}
+  .ib:active{transform:scale(.94);transition:transform 60ms ease-out}
+  .ib svg{width:16px;height:16px}
+  .ib:focus-visible,.send:focus-visible,.tool:focus-visible,.menu button:focus-visible{box-shadow:0 0 0 1px var(--accent),0 0 6px 1px rgba(37,125,224,.6)}
+  .av{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font:500 9px/1 ${SANS};color:#fff;flex:none}
+  .av.you{background:var(--you)} .av.claude{background:var(--claude)} .av svg{width:12px;height:12px}
+  .av.codex{background:var(--t1);color:var(--surface)}
 
-  .layer{position:absolute;top:0;left:0;width:0;height:0}
-  .region{position:absolute;border:2px solid rgba(224,178,58,.75);background:rgba(224,178,58,.12);border-radius:6px;pointer-events:none}
-  .region.done{border-color:rgba(62,207,122,.75);background:rgba(62,207,122,.12)}
-  .region.focus{border-color:#7c9cff;background:rgba(124,156,255,.14)}
-  .band{position:absolute;border:2px dashed #7c9cff;background:rgba(124,156,255,.12);border-radius:6px;display:none;pointer-events:none}
-  .pin{position:absolute;min-width:20px;height:20px;padding:0 5px;border-radius:999px;border:none;background:#e0b23a;color:#241b00;
-    font:600 11px/20px ${FONT};display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.35);z-index:2}
-  .pin.done{background:#3ecf7a;color:#04220f}
-  .pin.focus,.pin:hover{outline:2px solid #fff;transform:scale(1.12)}
+  .top{position:fixed;top:16px;right:16px;display:flex;align-items:center;gap:2px;height:36px;padding:4px;border-radius:12px;
+    background:var(--surface);box-shadow:inset 0 0 0 1px var(--ring),var(--sh-sm);z-index:40;transition:right .3s var(--ease)}
+  .ui.panel-open .top{right:336px}
+  .tool{all:unset;box-sizing:border-box;height:28px;min-width:28px;padding:0 6px;display:flex;align-items:center;justify-content:center;gap:4px;border-radius:8px;
+    color:var(--t2);cursor:pointer;font:500 13px/1 ${SANS};transition:background-color 60ms,color 60ms,transform .45s var(--spring)}
+  .tool:hover,.tool[aria-expanded="true"],.tool.sel{background:var(--ghost);color:var(--t1)}
+  .tool:active{transform:scale(.96);transition:transform 60ms ease-out}
+  .tool svg{width:16px;height:16px} .tool .caret{width:10px;height:10px;opacity:.6}
+  .tool .n{color:var(--t2);font-variant-numeric:tabular-nums}
+  .sep{width:1px;height:16px;background:var(--line);margin:0 3px}
 
-  .dock{position:fixed;bottom:16px;right:16px;z-index:2147483000;display:flex;align-items:center;gap:2px;
-    background:#161a21;border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:3px;box-shadow:0 4px 14px rgba(0,0,0,.28);opacity:.7;transition:right .2s ease,opacity .15s}
-  .dock:hover,.ui.on .dock{opacity:1}
-  .ui.on .dock{border-radius:12px;padding:4px}
-  .ui.railopen .dock{right:calc(var(--az-rail-w,${RAIL_W}px) + 16px)}
-  @media (max-width:760px){.ui.railopen .dock{display:none}}
-  .master{width:30px;height:30px;display:flex;align-items:center;justify-content:center;font-size:15px;background:transparent;border:none;border-radius:999px;padding:0}
-  .master:hover{background:#12161d}
-  .master .ic{margin:0}
-  .ui.on .master{display:none}
-  .cnt{display:none;align-items:center;height:30px;font-weight:600;font-size:12px;color:#9aa3b2;background:transparent;border:none;border-radius:999px;padding:0 10px 0 2px;white-space:nowrap}
-  .cnt:hover{color:#e7e9ee}
-  .dock.has .cnt,.ui.on .cnt{display:inline-flex}
-  .cnt .cl{display:none}
-  .ui.on .cnt{height:32px;padding:0 10px;border-radius:9px;color:inherit}
-  .ui.on .cnt:hover{background:#12161d}
-  .ui.on .cnt .cl{display:inline;margin-right:5px}
-  .ui.on .cnt .n{color:#9aa3b2;font-weight:500}
-  .dock .offbtn{display:none}
-  .ui.on .dock .offbtn{display:flex}
-  .dock .master[data-tip]:hover::after,.dock .cnt[data-tip]:hover::after,.dock .offbtn[data-tip]:hover::after{left:auto;right:0;transform:none}
-  .tools{display:none;align-items:center;gap:3px;padding-left:4px;margin-left:2px;border-left:1px solid #252b36}
-  .ui.on .tools{display:flex}
-  .tool{position:relative;width:32px;height:32px;border-radius:8px;border:1px solid transparent;background:transparent;color:#9aa3b2;
-    font-size:15px;display:flex;align-items:center;justify-content:center;transition:background .1s,color .1s}
-  .tool:hover{background:#12161d;color:#e7e9ee}
-  .tool.active{background:#7c9cff;color:#0b1020;border-color:#7c9cff}
-  .tool .kbd{position:absolute;bottom:2px;right:3px;font-size:8.5px;opacity:.65}
-  .tool.lock.lockon{background:#12161d;color:#7c9cff;border-color:#252b36}
-  .div{width:1px;height:24px;background:#252b36;margin:0 3px}
-  .txt{font-weight:600;font-size:13px;background:transparent;border:none;border-radius:9px;padding:7px 11px;white-space:nowrap}
-  .txt:hover{background:#12161d}
-  .txt .n{color:#9aa3b2;font-weight:500;margin-left:4px}
-  .modelbtn{display:none}
-  .ui.live .modelbtn{display:inline-flex;align-items:center;gap:6px}
-  .modelbtn .dot{width:7px;height:7px;border-radius:50%;background:#d97757}
-  .modelbtn.codex .dot{background:#10a37f}
-  [data-tip]{position:relative}
-  [data-tip]:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);white-space:nowrap;
-    background:#000;color:#fff;font:500 11px ${FONT};padding:4px 8px;border-radius:6px;pointer-events:none}
+  .menu{position:fixed;min-width:180px;background:var(--popover);border-radius:14px;padding:4px;z-index:60;box-shadow:inset 0 0 0 1px var(--ring),var(--sh-pop);
+    transform-origin:top right;animation:pop .14s var(--ease);--cols:16px minmax(0,1fr) auto 16px}
+  .menu.noicons{--cols:minmax(0,1fr) auto 16px} .menu.noicons .ic{display:none}
+  @keyframes pop{from{opacity:0;transform:scale(.97) translateY(-2px)}}
+  .menu button{all:unset;box-sizing:border-box;display:grid;grid-template-columns:var(--cols);column-gap:10px;align-items:start;width:100%;min-height:30px;padding:5px 10px;
+    border-radius:8px;cursor:pointer;font:14px/20px ${SANS};color:var(--t1)}
+  .menu button:hover{background:var(--ghost)} .menu button.danger{color:var(--danger)} .menu button[disabled]{opacity:.45;cursor:default}
+  .menu small{display:block;color:var(--t2);font-size:12px;line-height:16px}
+  .menu .ic{display:grid;place-items:center;height:20px} .menu .ic svg{width:16px;height:16px;color:var(--t2)}
+  .menu .chk{display:grid;place-items:center;height:20px;visibility:hidden} .menu .chk svg{width:14px;height:14px}
+  .menu button.sel .chk{visibility:visible}
+  .menu kbd{min-width:12px;text-align:right;color:var(--t3);font:12px/20px ${SANS}}
+  .menu hr{border:0;height:1px;background:var(--line);margin:4px 8px}
+  .menu h5{margin:6px 10px 2px;font:500 11px/16px ${SANS};color:var(--t3);text-transform:uppercase;letter-spacing:.04em}
 
-  .menu{position:fixed;bottom:60px;right:16px;z-index:2147483002;width:300px;max-height:70vh;overflow:auto;display:none;
-    background:#161a21;border:1px solid #252b36;border-radius:12px;padding:6px;box-shadow:0 14px 40px rgba(0,0,0,.5)}
-  .ui.railopen .menu{right:calc(var(--az-rail-w,${RAIL_W}px) + 16px)}
-  .menu.show{display:block}
-  .menu h5{margin:8px 8px 4px;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;color:#9aa3b2;display:flex;gap:6px;align-items:center}
-  .menu h5 small{font-weight:500;text-transform:none;letter-spacing:0;color:#6d7583}
-  .opt{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:transparent;border:none;border-radius:8px;padding:7px 9px;font-size:13px}
-  .opt:hover{background:#12161d}
-  .opt .ck{width:14px;color:#7c9cff}
-  .opt[disabled]{opacity:.4;cursor:default}
-  .efforts{display:flex;flex-wrap:wrap;gap:5px;padding:4px 8px 8px}
+  .selbar{position:fixed;display:none;height:36px;padding:4px;border-radius:12px;background:var(--popover);z-index:45;box-shadow:inset 0 0 0 1px var(--ring),var(--sh-pop)}
+  .selbar.show{display:flex;animation:rise .14s var(--ease)}
+  @keyframes rise{from{opacity:0;transform:translateY(4px)}}
+  .selbar .tool{color:var(--t1);padding:0 10px 0 8px;gap:6px;font-size:14px;font-weight:450}
 
-  .badge{position:fixed;z-index:2147483001;display:none;background:#7c9cff;color:#0b1020;font:600 10.5px ${FONT};padding:2px 7px;border-radius:6px;
-    pointer-events:none;white-space:nowrap;max-width:60vw;overflow:hidden;text-overflow:ellipsis}
+  .rail{position:absolute;top:0;left:0;width:284px;z-index:20}
+  .card{position:absolute;left:0;width:284px;background:var(--surface);border-radius:16px;box-shadow:inset 0 0 0 1px var(--ring),var(--sh-sm);
+    transition:top .26s var(--ease),translate .2s var(--ease),opacity .2s var(--ease),box-shadow .2s var(--ease)}
+  .card.on{translate:-8px 0;box-shadow:inset 0 0 0 1px var(--ring),var(--sh-md);z-index:3}
+  .card.lifted{box-shadow:inset 0 0 0 1px var(--ring),var(--sh-pop);z-index:4}
+  .card.enter{opacity:0;translate:0 4px} .card.leave{opacity:0;translate:12px 0;pointer-events:none}
+  .card.pinned{transition:translate .2s var(--ease),opacity .2s,box-shadow .2s}
+  .card .inner{padding:16px} .card .msgwrap{position:relative}
+  .scroll{max-height:min(456px,calc(55vh + 16px));overflow-y:auto;margin:-6px -8px -8px;padding:6px 8px 8px;scrollbar-width:thin;scrollbar-color:var(--ghost-2) transparent}
+  .card:not(.on):not(.lifted) .scroll{max-height:140px;overflow:hidden}
+  .card.clipped:not(.on):not(.lifted) .scroll{-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent)}
+  .tcard .scroll{max-height:none;overflow:visible;margin:0;padding:0}
+  .seemore{all:unset;position:absolute;left:50%;transform:translateX(-50%);bottom:12px;display:none;align-items:center;gap:4px;height:24px;padding:0 10px;border-radius:12px;
+    background:var(--popover);box-shadow:inset 0 0 0 1px var(--ring),var(--sh-pop);font:500 12px/1 ${SANS};color:var(--t1);cursor:pointer}
+  .seemore svg{width:12px;height:12px} .card.overflowing .seemore{display:flex}
 
-  .adder{position:fixed;z-index:2147483001;display:flex;background:#161a21;border:1px solid #252b36;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.45);
-    overflow:hidden;opacity:0;transform:translateY(4px) scale(.98);pointer-events:none;transition:opacity .12s,transform .12s}
-  .adder.show{opacity:1;transform:none;pointer-events:auto}
-  .adder button{border:none;background:transparent;font-weight:600;font-size:12.5px;padding:8px 12px;display:inline-flex;gap:6px;align-items:center}
-  .adder button:hover{background:#7c9cff;color:#0b1020}
-  .adder button+button{border-left:1px solid #252b36}
+  .msg{position:relative} .msg+.msg{margin-top:12px}
+  .who{position:relative;display:flex;align-items:center;gap:8px;height:28px;margin:-4px 0 2px}
+  .who>*{white-space:nowrap}
+  .name{font-size:13px;font-weight:520;flex:none} .time{font-size:12px;color:var(--t3);flex:none}
+  .by{font-size:12px;color:var(--t3);min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
+  .by::before{content:"·";margin-right:6px}
+  .acts{position:absolute;right:-4px;top:0;bottom:0;display:flex;align-items:center;padding-left:32px;opacity:0;pointer-events:none;
+    background:linear-gradient(to right,transparent,var(--rowbg,var(--surface)) 30%);transition:opacity 60ms var(--snap)}
+  .msg:hover .acts,.acts:focus-within{opacity:1;pointer-events:auto;transition:opacity .12s var(--snap)}
+  .body{min-width:0;overflow-wrap:anywhere}
+  .body p{margin:0 0 8px} .body p:last-child{margin-bottom:0}
+  .body ul,.body ol{margin:4px 0 8px;padding-left:18px} .body li{margin:2px 0}
+  .body h4{font-size:14px;font-weight:600;margin:10px 0 4px} .body strong{font-weight:600}
+  .body a{color:var(--accent-text);text-underline-offset:2px}
+  .body code{font:12.5px ${MONO};background:var(--code);border-radius:4px;padding:1px 4px}
+  .body pre{font:12px/1.5 ${MONO};background:var(--code);border-radius:8px;padding:9px 11px;margin:6px 0;white-space:pre;overflow-x:auto}
+  .body pre code{background:none;padding:0} .body pre code.hljs{background:none;padding:0}
+  .body .katex-display{margin:6px 0;overflow-x:auto;overflow-y:hidden}
+  .body .tex{font:12px ${MONO};color:var(--t2)} .body .tex.disp{display:block;margin:6px 0;white-space:pre-wrap}
+  .body .tbl{overflow-x:auto;margin:6px 0}
+  .body table{border-collapse:collapse;font-size:12.5px;width:100%}
+  .body th,.body td{border-bottom:1px solid var(--line);padding:4px 7px;text-align:left;vertical-align:top} .body th{color:var(--t2);font-weight:520}
+  .note{font-size:12.5px;color:var(--t3)}
+  .thinking{font-size:14px;font-weight:450;background:linear-gradient(90deg,var(--t3) 0%,var(--t3) 35%,var(--t1) 50%,var(--t3) 65%,var(--t3) 100%);background-size:300% 100%;
+    -webkit-background-clip:text;background-clip:text;color:transparent;animation:shine 1.6s cubic-bezier(.45,0,.55,1) infinite}
+  @keyframes shine{from{background-position:100% 0}to{background-position:0 0}}
+  .rs .sq{fill:var(--accent);fill-opacity:0;stroke:currentColor;stroke-width:1.6;stroke-dasharray:52;stroke-dashoffset:52;opacity:0}
+  .rs .ck{fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .resolving .rs .sq{opacity:1;stroke:var(--accent);animation:sq .34s var(--ease) forwards} .resolving .rs .ck{animation:ck .34s forwards}
+  @keyframes sq{0%{stroke-dashoffset:52;fill-opacity:0}55%{stroke-dashoffset:0;fill-opacity:0}100%{stroke-dashoffset:0;fill-opacity:1}}
+  @keyframes ck{0%,74.9%{stroke:currentColor}75%,100%{stroke:#fff}}
 
-  .rail{position:fixed;top:0;right:0;height:100vh;width:var(--az-rail-w,${RAIL_W}px);max-width:100vw;background:#161a21;border-left:1px solid #252b36;
-    transform:translateX(100%);transition:transform .2s ease,width .2s ease;z-index:2147483000;display:flex;flex-direction:column}
-  .ui.railopen .rail{transform:none}
-  .rail.sizing{transition:none}
-  /* Full window: the rail covers the page (the page keeps its layout underneath); content stays a readable width. */
-  .ui.full .rail{width:100vw;border-left:none}
-  .ui.full .grip,.ui.full .dock,.ui.full .menu{display:none}
-  .ui.full .filters,.ui.full .list,.ui.full footer{padding-left:max(12px,calc(50vw - 440px));padding-right:max(12px,calc(50vw - 440px))}
-  .ui.full .shot{max-height:360px}
-  .fullbtn{display:flex;align-items:center;justify-content:center;padding:4px 6px}
-  .fullbtn svg{width:15px;height:15px;display:block}
-  .fullbtn+.x{margin-left:0}
-  .fullbtn .in,.ui.full .fullbtn .out{display:none}
-  .ui.full .fullbtn .in{display:block}
-  @media (max-width:760px){.fullbtn{display:none}.fullbtn+.x{margin-left:auto}}
-  .grip{position:absolute;top:0;left:-4px;width:8px;height:100%;cursor:col-resize;z-index:2;touch-action:none}
-  .grip::after{content:"";position:absolute;top:0;bottom:0;left:3px;width:2px;background:transparent;transition:background .15s .1s}
-  .grip:hover::after,.grip:focus-visible::after,.rail.sizing .grip::after{background:#7c9cff}
-  .grip:focus{outline:none}
-  @media (max-width:760px){.grip{display:none}}
-  @media (max-width:760px){.rail{width:100vw}}
-  .rail header{flex:none;padding:14px 16px;border-bottom:1px solid #252b36;display:flex;align-items:center;gap:8px;background:transparent}
-  .rail header b{font-size:14px;font-weight:650}
-  .rail header .live{font-size:11.5px;color:#9aa3b2;display:none}
-  .ui.live .rail header .live{display:inline}
-  .x{background:transparent;border:none;color:#9aa3b2;font-size:16px;margin-left:auto;padding:2px 6px;border-radius:6px}
-  .x:hover{color:#e7e9ee;background:#12161d}
-  .filters{flex:none;display:flex;gap:6px;padding:10px 12px;border-bottom:1px solid #252b36}
-  .chip{font-size:12px;font-weight:500;color:#9aa3b2;background:#12161d;border:1px solid #252b36;border-radius:999px;padding:4px 11px;transition:background .12s,color .12s}
-  .chip.on{background:#7c9cff;color:#0b1020;border-color:#7c9cff;font-weight:600}
-  .chip .n{margin-left:4px;opacity:.75}
-  .list{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:10px;overscroll-behavior:contain}
-  .card{border:1px solid #252b36;border-left:3px solid #e0b23a;border-radius:11px;padding:10px 11px;margin-bottom:9px;cursor:pointer;background:#12161d;
-    transition:border-color .12s,background .12s;min-width:0}
-  .card.done{border-left-color:#3ecf7a}
-  .card.hlonly{border-left-style:dashed}
-  .card.focus{border-color:#7c9cff}
-  .card.active{cursor:auto;background:#1a1f27;border-color:#7c9cff;padding:12px 13px}
-  .top{display:flex;align-items:center;gap:7px;margin-bottom:5px}
-  .type{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#9aa3b2}
-  .st{margin-left:auto;font-size:10px;font-weight:700;padding:1px 7px;border-radius:999px}
-  .st.open{color:#e0b23a;background:rgba(224,178,58,.16)}
-  .st.doneb{color:#3ecf7a;background:rgba(62,207,122,.16)}
-  .st.busy{color:#7c9cff;background:rgba(124,156,255,.16)}
-  .collapse{background:transparent;border:none;color:#9aa3b2;font-size:13px;line-height:1;padding:2px 4px;border-radius:6px}
-  .collapse:hover{color:#e7e9ee;background:#12161d}
-  .lbl{font-size:13px;color:#d4d8e2;line-height:1.45;font-style:italic;overflow-wrap:anywhere}
-  .card.active .lbl{cursor:pointer}
-  .shot{display:block;max-width:100%;max-height:180px;border-radius:7px;border:1px solid #2a3140;background:#fff}
-  .lbl.pic{font-style:normal}
-  .card.active .lbl:hover{color:#fff;text-decoration:underline dotted #9aa3b2}
-  .q{font-size:12.5px;color:#9aa3b2;margin-top:5px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere}
-  .empty{color:#9aa3b2;font-size:13px;line-height:1.6;padding:22px 18px}
-  .empty kbd{background:#12161d;border:1px solid #252b36;border-radius:5px;padding:1px 6px;font:600 11px ${FONT};color:#e7e9ee}
-  .rail footer{flex:none;padding:12px;border-top:1px solid #252b36;background:#161a21}
-  .rail footer .btn{width:100%;text-align:center;padding:9px}
-  .cap{font-size:10.5px;color:#9aa3b2;margin-top:8px;text-align:center;line-height:1.4}
+  .field{border-radius:14px;background:var(--field);padding:7px 12px;font:13px/20px ${SANS};cursor:text;transition:background-color .15s var(--ease),box-shadow .15s var(--ease)}
+  .card .field,.tcard .field{margin-top:12px}
+  .field.focus{background:transparent;box-shadow:0 0 0 1px var(--accent),0 0 6px 1px rgba(37,125,224,.45)}
+  .field.bare{background:transparent;padding:0;margin:0;box-shadow:none}
+  .ed{outline:none;min-height:20px;max-height:272px;overflow:auto;overflow-wrap:anywhere;white-space:pre-wrap;color:var(--t1)}
+  .ed:empty::before{content:attr(data-ph);color:var(--t3);pointer-events:none}
+  .frow{display:grid;grid-template-rows:0fr;transition:grid-template-rows .18s var(--ease)}
+  .frow>div{overflow:hidden;display:flex;align-items:center;gap:6px;min-height:0}
+  .field.focus .frow,.field.bare .frow{grid-template-rows:1fr}
+  .frow>div>*{margin-top:8px}
+  .model{all:unset;display:flex;align-items:center;gap:3px;height:24px;padding:0 6px;margin-left:-6px;border-radius:6px;font:12px/1 ${SANS};color:var(--t2);cursor:pointer}
+  .model:hover{background:var(--ghost);color:var(--t1)} .model svg{width:10px;height:10px;opacity:.7}
+  .send{all:unset;box-sizing:border-box;margin-left:auto;width:28px;height:28px;border-radius:50%;display:grid;place-items:center;cursor:default;color:var(--t3);
+    background:var(--ghost);transition:background-color .12s var(--ease),color .12s,transform .45s var(--spring)}
+  .send.ready{background:var(--accent);color:#fff;cursor:pointer} .send.ready:active{transform:scale(.92);transition:transform 60ms ease-out}
+  .send svg{width:14px;height:14px}
 
-  .msgs{display:flex;flex-direction:column;gap:11px;margin-top:11px}
-  .msg{font-size:13.5px;line-height:1.55;min-width:0;user-select:text;-webkit-user-select:text;cursor:text}
-  .who{font-size:9.5px;text-transform:uppercase;letter-spacing:.7px;color:#9aa3b2;display:block;margin-bottom:4px;user-select:none;-webkit-user-select:none}
-  .msg.user .bubble{color:#fff}
-  .msg.claude .bubble{color:#cdd4e6;background:#0f1319;border-radius:10px;padding:9px 11px;border:1px solid #252b36}
-  .bubble{min-width:0;overflow-wrap:anywhere;word-break:normal}
-  .bubble p{margin:0 0 7px}
-  .bubble p:last-child{margin-bottom:0}
-  .bubble ul,.bubble ol{margin:5px 0 7px;padding-left:19px}
-  .bubble li{margin:3px 0}
-  .bubble h4{font-size:13.5px;font-weight:650;color:#fff;margin:8px 0 4px}
-  .bubble strong{color:#fff;font-weight:650}
-  .bubble em{font-style:italic}
-  .bubble code{font-family:${MONO};font-size:12px;background:#0b0e13;border:1px solid #252b36;border-radius:5px;padding:0 4px;
-    white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;-webkit-box-decoration-break:clone;box-decoration-break:clone;letter-spacing:0}
-  .bubble pre{font-family:${MONO};font-size:12px;background:#0b0e13;border:1px solid #252b36;border-radius:8px;padding:9px 11px;margin:6px 0;
-    white-space:pre;overflow-wrap:normal;overflow-x:auto;max-width:100%;line-height:1.5}
-  .bubble pre code{background:none;border:none;padding:0;white-space:pre;overflow-wrap:normal;word-break:normal}
-  .bubble pre code.hljs{background:none;padding:0;color:#d6dbe6}
-  .bubble .katex{font-size:1.05em;color:#e7e9ee}
-  .bubble .katex-display{margin:6px 0;overflow-x:auto;overflow-y:hidden;padding:2px 0}
-  .bubble .tex{font-family:${MONO};font-size:12px;color:#c9d3ff}
-  .bubble .tex.disp{display:block;margin:6px 0;white-space:pre-wrap}
-  .bubble .tbl{overflow-x:auto;margin:6px 0}
-  .bubble table{border-collapse:collapse;font-size:12.5px;width:100%}
-  .bubble th,.bubble td{border:1px solid #252b36;padding:4px 7px;text-align:left;vertical-align:top}
-  .bubble th{background:#12161d;color:#fff;font-weight:600}
-  .bubble a{color:#7c9cff;overflow-wrap:anywhere}
-  .skel{display:flex;flex-direction:column;gap:6px;background:#0f1319;border-radius:10px;padding:9px 11px;border:1px solid #252b36}
-  .skline{height:9px;border-radius:5px;width:100%;background:linear-gradient(90deg,#161a21 25%,#1d222b 37%,#161a21 63%);background-size:400% 100%;animation:shimmer 1.4s ease infinite}
-  .skline:nth-child(2){width:82%}
-  .skline:nth-child(3){width:58%}
-  @keyframes shimmer{0%{background-position:100% 0}100%{background-position:0 0}}
-  .compose{margin-top:11px;padding-top:11px;border-top:1px solid #252b36}
-  .compose textarea{display:block;width:100%;font-size:13.5px;background:#0f1319;border:1px solid #252b36;color:#e7e9ee;border-radius:9px;padding:8px 9px;
-    resize:vertical;min-height:44px;max-height:40vh}
-  .compose textarea:focus{outline:none;border-color:#7c9cff}
-  .row{display:flex;align-items:center;gap:8px;margin-top:8px}
-  .hint{font-size:10.5px;color:#9aa3b2;flex:1;min-width:0}
-  .btn{font-size:12.5px;border-radius:8px;border:1px solid #252b36;background:#12161d;padding:6px 11px}
-  .btn:hover{border-color:#7c9cff;color:#fff}
-  .btn.primary{background:#7c9cff;color:#0b1020;border-color:#7c9cff;font-weight:650}
-  .btn.danger:hover{border-color:#e5484d;color:#ff6b6f}
-  .btn.ghost{background:transparent}
+  .panel{position:fixed;top:0;right:0;bottom:0;width:320px;background:var(--surface);box-shadow:inset 1px 0 0 var(--line);display:flex;flex-direction:column;z-index:30;
+    translate:100% 0;visibility:hidden;transition:translate .3s var(--ease),visibility 0s .3s}
+  .ui.panel-open .panel{translate:0 0;visibility:visible;transition:translate .3s var(--ease)}
+  .ph{display:flex;align-items:center;gap:2px;height:56px;padding:0 10px 0 18px;flex:none}
+  .ph h3{margin:0;font:520 14px/20px ${SANS}} .ph .n{color:var(--t3);font-size:13px;margin:0 auto 0 8px;font-variant-numeric:tabular-nums}
+  .plist{overflow:auto;flex:1;padding:4px 0 40px;scrollbar-width:thin}
+  .pnew{padding:12px 18px 16px;box-shadow:inset 0 -1px 0 var(--line)}
+  .tcard{--rowbg:var(--surface);position:relative;padding:14px 18px;cursor:pointer;overflow:hidden;transition:background-color .12s,opacity .2s var(--ease),max-height .26s var(--ease),padding .26s var(--ease)}
+  .tcard:hover,.tcard.on{background:var(--tint);--rowbg:color-mix(in srgb,var(--surface),var(--t1) 3%)}
+  .tcard.enter{opacity:0} .tcard.leave{opacity:0;max-height:0!important;padding-top:0;padding-bottom:0;pointer-events:none}
+  .quote{border-left:2px solid var(--ghost-2);padding-left:12px;margin-bottom:12px;color:var(--t2);font-size:12px;line-height:17px;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .quote .kind{color:var(--t3);text-transform:uppercase;letter-spacing:.04em;font-size:10.5px;margin-right:4px}
+  .shot{display:block;max-width:100%;max-height:120px;border-radius:6px;margin:0 0 12px;box-shadow:0 0 0 1px var(--line)}
+  .rtag{margin-top:10px;font-size:12px;color:var(--t3);display:flex;align-items:center;gap:6px} .rtag svg{width:14px;height:14px}
+  .rtag[hidden],.pnew[hidden],.empty[hidden]{display:none}
+  .empty{color:var(--t3);font-size:13px;padding:40px 24px;text-align:center;line-height:20px;white-space:pre-line}
 
+  .band{position:fixed;display:none;border-radius:4px;box-shadow:inset 0 0 0 1.5px var(--accent);background:rgba(37,125,224,.08);z-index:44;pointer-events:none}
+  .pick{position:fixed;display:none;pointer-events:none;border-radius:6px;box-shadow:0 0 0 1.5px var(--accent);background:rgba(37,125,224,.07);z-index:44}
+  .pick.show{display:block}
+  .pick span{position:absolute;left:-1px;bottom:calc(100% + 4px);white-space:nowrap;padding:2px 7px;border-radius:6px;background:var(--accent);color:#fff;font:500 11px/16px ${SANS}}
+  .pick span i{font-style:normal;opacity:.8;margin-left:6px}
+  .toast{position:fixed;bottom:24px;left:50%;translate:-50% 0;display:none;align-items:center;gap:4px;min-height:40px;max-width:min(560px,calc(100vw - 32px));padding:0 6px 0 14px;
+    border-radius:12px;background:var(--popover);box-shadow:inset 0 0 0 1px var(--ring),var(--sh-pop);font:14px/20px ${SANS};color:var(--t1);z-index:70}
+  .toast.show{display:flex;animation:rise .16s var(--ease)}
+  .toast span{padding:10px 8px 10px 0}
+  .toast button{all:unset;cursor:pointer;font-weight:520;padding:4px 8px;border-radius:8px;color:var(--accent-text);flex:none}
+  .toast button:hover{background:var(--ghost)} .toast button:empty{display:none}
+  .pastebox{position:fixed;top:15%;left:10%;width:80%;height:60%;z-index:80;background:var(--surface);color:var(--t1);border:0;border-radius:14px;padding:14px;
+    font:12px/1.5 ${MONO};box-shadow:0 0 0 1px var(--accent),var(--sh-pop)}
+  @media (max-width:700px){.panel{width:100%} .ui.panel-open .top{right:16px}}
+  @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:1ms!important;animation-iteration-count:1!important;transition-duration:1ms!important}}`;
 
-  .toast{position:fixed;top:16px;left:50%;transform:translate(-50%,-6px);background:#e7e9ee;color:#0f1115;font-weight:600;font-size:12.5px;
-    padding:9px 15px;border-radius:10px;opacity:0;transition:opacity .18s,transform .18s;pointer-events:none;z-index:2147483003;max-width:80vw}
-  .ui.railopen .toast{left:calc((100vw - var(--az-rail-w,${RAIL_W}px)) / 2)}
-  .ui.full .toast{left:50%;top:auto;bottom:84px}
-  .toast.show{opacity:1;transform:translate(-50%,0)}
-  .pastebox{position:fixed;top:20%;left:10%;width:80%;height:50%;z-index:2147483003;background:#0f1319;color:#e7e9ee;border:1px solid #7c9cff;border-radius:10px;padding:10px;font:12px ${MONO}}
-  @media (prefers-reduced-motion:reduce){.rail,.adder,.chip,.card,.toast,.tool,.dock{transition:none}.skline{animation:none}}
-  `;
+  const svg = (d, extra = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" ${extra}>${d}</svg>`;
+  const I = {
+    comment: svg('<path d="M20 11.5a7.5 7.5 0 0 1-11 6.6L4 19.5l1.4-4.6A7.5 7.5 0 1 1 20 11.5z"/>'),
+    cursor: svg('<path d="M5 4l6.5 16 2.3-6.7L20.5 11z"/>'),
+    box: svg('<path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/>'),
+    block: svg('<rect x="4" y="5" width="16" height="14" rx="2.5"/><path d="M8 10h8M8 14h5"/>'),
+    check: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
+    undo: svg('<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>'),
+    trash: svg('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>'),
+    dots: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/></svg>',
+    up: svg('<path d="M12 19V5M6 11l6-6 6 6"/>', 'stroke-width="2"'),
+    x: svg('<path d="M6 6l12 12M18 6 6 18"/>'),
+    filter: svg('<path d="M4 6h16M7 12h10M10 18h4"/>'),
+    down: svg('<path d="M12 5v14M6 13l6 6 6-6"/>', 'stroke-width="2"'),
+    caret: svg('<path d="m7 10 5 5 5-5"/>', 'class="caret" stroke-width="2"'),
+    copy: svg('<rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>'),
+    codex: svg('<path d="M7 8l4 4-4 4M13 16h4"/>', 'stroke-width="2.2"'),
+    spark: '<svg viewBox="0 0 24 24" fill="#fff"><path d="M12 2l1.6 6.2L20 6l-4.4 4.8L22 12l-6.4 1.2L20 18l-6.4-2.2L12 22l-1.6-6.2L4 18l4.4-4.8L2 12l6.4-1.2L4 6l6.4 2.2z"/></svg>',
+    resolve: '<svg class="rs" viewBox="0 0 20 20" width="16" height="16"><rect class="sq" x="2.5" y="2.5" width="15" height="15" rx="4.5" pathLength="52"/><path class="ck" d="M6.2 10.4l2.6 2.6 5-5.6"/></svg>',
+  };
 
   const host = document.createElement('az-annotate');
-  host.setAttribute('style', 'all:initial!important;position:absolute!important;top:0!important;left:0!important;width:0!important;height:0!important;display:block!important;z-index:2147483000!important;pointer-events:auto!important');
+  host.style.cssText = 'all:initial;position:absolute;left:0;top:0;width:0;height:0;z-index:2147483000;';
+  document.body.appendChild(host);
   const root = host.attachShadow({ mode: 'open' });
   root.innerHTML = `<style>${UI_STYLE}</style>
-  <div class="layer" id="layer"><div class="band" id="band"></div></div>
   <div class="ui" id="ui">
-    <aside class="rail" id="rail">
-      <div class="grip" id="grip" role="separator" aria-orientation="vertical" aria-label="Resize threads panel" tabindex="0" title="Drag to resize · double-click to reset"></div>
-      <header><b><span class="ic">💬</span>Threads</b><span class="live">· ⚡ live</span><button class="x fullbtn" id="fullBtn" title="Expand to full window" aria-label="Expand to full window" aria-pressed="false"><svg class="out" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9"/></svg><svg class="in" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 6.5h-4v-4M9.5 6.5l4-4M2.5 9.5h4v4M6.5 9.5l-4 4"/></svg></button><button class="x" id="closeRail" title="Close">✕</button></header>
-      <div class="filters">
-        <button class="chip on" data-filter="all">All<span class="n" id="cAll">0</span></button>
-        <button class="chip" data-filter="open">Unanswered<span class="n" id="cOpen">0</span></button>
-        <button class="chip" data-filter="done">Answered<span class="n" id="cDone">0</span></button>
-      </div>
-      <div class="list" id="list"><div class="empty" id="empty"></div></div>
-      <footer><button class="btn primary" id="copyBtn"><span class="ic">📋</span>Copy questions for Claude</button></footer>
-    </aside>
-    <div class="dock" id="dock">
-      <button class="master" id="master" data-tip="Annotate" aria-label="Annotate"><span class="ic">💬</span></button>
-      <div class="tools">
-        <button class="tool active" data-tool="select" data-tip="Read / select — V">↖<span class="kbd">V</span></button>
-        <button class="tool" data-tool="region" data-tip="Region box — R">▭<span class="kbd">R</span></button>
-        <button class="tool" data-tool="element" data-tip="Element — E">◎<span class="kbd">E</span></button>
-        <button class="tool lock" id="lock" data-tip="Tool lock — place many">🔒</button>
-        <span class="div"></span>
-        <button class="txt modelbtn" id="modelBtn" data-tip="Who answers"><span class="dot"></span><span id="modelName">Model</span></button>
-      </div>
-      <button class="cnt" id="dockThreads" data-tip="Threads"><span class="cl">Threads</span><span class="n" id="dockn">0</span></button>
-      <button class="tool offbtn" id="offBtn" data-tip="Turn off" aria-label="Turn off annotating">✕</button>
+    <div class="top" role="toolbar" aria-label="Annotate">
+      <button class="tool" id="modeBtn" aria-haspopup="menu" aria-expanded="false"></button><span class="sep"></span>
+      <button class="tool" id="listBtn" title="All comments" aria-label="Show all comments"></button>
     </div>
-    <div class="menu" id="menu"></div>
-    <div class="badge" id="badge"></div>
-    <div class="adder" id="adder"><button id="addComment"><span class="ic">💬</span>Comment</button><button id="addHighlight"><span class="ic">✏️</span>Highlight</button></div>
-    <div class="toast" id="toast"></div>
+    <div class="selbar" id="selbar" role="toolbar" aria-label="Selection"><button class="tool" id="sbComment">${I.comment}Comment</button></div>
+    <div class="rail" id="rail"></div>
+    <aside class="panel" id="panel" aria-label="Comments">
+      <div class="ph"><h3>Comments</h3><span class="n" id="pcount"></span>
+        <button class="ib" id="filterBtn" title="Filter" aria-label="Filter">${I.filter}</button>
+        <button class="ib" id="pmoreBtn" title="More" aria-label="More">${I.dots}</button>
+        <button class="ib" id="pclose" title="Close" aria-label="Close">${I.x}</button></div>
+      <div class="pnew" id="pnew" hidden></div>
+      <div class="plist" id="plist"><div class="empty" id="pempty" hidden></div></div>
+    </aside>
+    <div class="band" id="band"></div>
+    <div class="pick" id="pick"><span></span></div>
+    <div class="toast" id="toast" role="status"><span></span><button></button></div>
   </div>`;
-  document.body.appendChild(host);
   const $ = id => root.getElementById(id);
-  const ui = $('ui'), layer = $('layer'), list = $('list');
+  const ui = $('ui'), rail = $('rail'), plist = $('plist');
   const fromUI = e => e.composedPath().includes(host);
 
-  function toast(t) { const el = $('toast'); el.textContent = t; el.classList.add('show'); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('show'), Math.min(1500 + t.length * 30, 6000)); }
+  /* theme: follow the doc's own background, so cards look native on light and dark docs */
+  function lum(c) { const m = String(c).match(/[\d.]+/g); if (!m) return null; const [r, g, b, a = 1] = m.map(Number); if (a < 0.1) return null; return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255; }
+  function applyTheme() {
+    let dark;
+    if (CFG.theme === 'dark' || CFG.theme === 'light') dark = CFG.theme === 'dark';
+    else {
+      const bg = lum(getComputedStyle(document.body).backgroundColor) ?? lum(getComputedStyle(HTML).backgroundColor);
+      dark = bg != null ? bg < 0.5 : (lum(getComputedStyle(document.body).color) ?? 0) > 0.6;
+    }
+    ui.dataset.theme = dark ? 'dark' : 'light';
+    HTML.style.setProperty('--az-edge', dark ? '#fbb315' : '#bf8004');
+  }
+  applyTheme();
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => setTimeout(applyTheme, 50));
+
+  let toastT;
+  function toast(s, label, fn, ms) {
+    const t = $('toast'); t.firstChild.textContent = s;
+    const b = t.querySelector('button'); b.textContent = label || ''; b.onclick = fn ? () => { t.classList.remove('show'); fn(); } : null;
+    t.classList.remove('show'); void t.offsetWidth; t.classList.add('show');
+    clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), ms || (fn ? 4500 : Math.min(1600 + s.length * 25, 6000)));
+  }
 
   /* ===================== markdown (safe: escape then subset) ===================== */
   function inlineMd(s) {
     const codes = [];
     s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return '\u0000' + (codes.length - 1) + '\u0000'; });
-    s = s
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
       .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>')
       .replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>')
-      .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+      .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+      .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
     return s.replace(/\u0000(\d+)\u0000/g, (_, i) => '<code>' + codes[i] + '</code>');
   }
-  /* Rich answers: math via KaTeX, code via highlight.js — both loaded from a CDN only when an
-     answer needs them. Offline (or a strict CSP), math stays as readable TeX and code stays plain. */
+  /* Math via KaTeX, code via highlight.js — loaded from a CDN only when an answer needs them.
+     Offline, math stays as readable TeX and code stays plain. */
   const KATEX = 'https://cdn.jsdelivr.net/npm/katex@0.16.47/dist/', HLJS = 'https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.12.0/';
-  const libs = {};   // name -> 'loading' | 'ok' | 'fail'
+  const libs = {};
   function addCss(href, where) { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = href; where.appendChild(l); }
-  // Only the @font-face rules go in the page head: the full sheet would restyle the doc's own math.
-  function addFonts(href) {
+  function addFonts(href) {   // only @font-face rules go in the page head: the full sheet would restyle the doc's own math
     const dir = href.slice(0, href.lastIndexOf('/') + 1);
     fetch(href).then(r => r.ok ? r.text() : '').then(t => {
       const faces = (t.match(/@font-face\s*\{[^}]*\}/g) || []).join('\n').replace(/url\((['"]?)(?![a-z]+:)/gi, 'url($1' + dir);
@@ -367,36 +369,29 @@
     if (test()) return true;
     if (libs[name]) return false;
     libs[name] = 'loading';
-    // CSS goes in the shadow root; for KaTeX its fonts also go in the page head (fonts don't load from a shadow root).
     css.forEach(([href, fonts]) => { addCss(href, root); if (fonts && !document.querySelector('style[data-az-fonts="' + href + '"]')) addFonts(href); });
     const sc = document.createElement('script'); sc.src = js; sc.async = true;
-    sc.onload = () => { libs[name] = test() ? 'ok' : 'fail'; refreshCards(); };
+    sc.onload = () => { libs[name] = test() ? 'ok' : 'fail'; refreshAll(); };
     sc.onerror = () => { libs[name] = 'fail'; };
     document.head.appendChild(sc);
     return false;
   }
   const katexReady = () => loadLib('katex', () => !!(window.katex && window.katex.renderToString), KATEX + 'katex.min.js', [[KATEX + 'katex.min.css', true]]);
   const hljsReady = () => loadLib('hljs', () => !!(window.hljs && window.hljs.highlightElement), HLJS + 'highlight.min.js', [[HLJS + 'styles/github-dark.min.css', false]]);
-  function refreshCards() { for (const c of cards.values()) c.sig = null; renderRail(); if (openId) updateStream(openId); }
   function renderTex(tex, display, raw) {
     if (katexReady()) { try { return window.katex.renderToString(tex, { displayMode: display, throwOnError: false, output: 'htmlAndMathml' }); } catch (e) {} }
     return '<span class="tex' + (display ? ' disp' : '') + '">' + esc(raw) + '</span>';
   }
-  // Pull math out before markdown runs, so `_`, `*` and `\` inside formulas survive. Code spans stay literal.
   function stashMath(text, maths) {
     const codes = [];
     text = text.replace(/`[^`\n]+`/g, c => { codes.push(c); return '\u0002' + (codes.length - 1) + '\u0002'; });
     const put = (raw, tex, display) => { maths.push(renderTex(tex.trim(), display, raw)); return '\u0001' + (maths.length - 1) + '\u0001'; };
-    text = text
-      .replace(/\$\$([\s\S]+?)\$\$/g, (r, t) => put(r, t, true))
-      .replace(/\\\[([\s\S]+?)\\\]/g, (r, t) => put(r, t, true))
+    text = text.replace(/\$\$([\s\S]+?)\$\$/g, (r, t) => put(r, t, true)).replace(/\\\[([\s\S]+?)\\\]/g, (r, t) => put(r, t, true))
       .replace(/\\\(([\s\S]+?)\\\)/g, (r, t) => put(r, t, false))
-      // $x$ — not "$5 and $10": no space just inside either $, no digit right after the closing $.
       .replace(/(^|[^\\$\w])\$(?!\s)([^$\n]+?)(?<!\s)\$(?![\w$])/g, (r, pre, t) => pre + put(r.slice(pre.length), t, false));
     return text.replace(/\u0002(\d+)\u0002/g, (_, i) => codes[i]);
   }
   function md(src) {
-    // Math is stashed per run of non-code lines (display math may span lines).
     const maths = [], out = [];
     let chunk = [], inFence = false;
     for (const raw of String(src || '').split(/\r?\n/)) {
@@ -417,7 +412,6 @@
       if (fence !== null) { code.push(raw); continue; }
       const line = raw.trim(); let m;
       if (!line) { flush(); continue; }
-      // Table: a |row| followed by a |---|---| separator.
       if (/^\|.*\|$/.test(line) && /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/.test((lines[i + 1] || '').trim())) {
         flush(); closeLists();
         html += '<div class="tbl"><table><thead><tr>' + cells(line).map(c => '<th>' + c + '</th>').join('') + '</tr></thead><tbody>';
@@ -427,14 +421,13 @@
       }
       if ((m = line.match(/^#{1,4}\s+(.*)$/))) { flush(); closeLists(); html += '<h4>' + inlineMd(m[1]) + '</h4>'; continue; }
       if ((m = line.match(/^(\d+)[.)]\s+(.*)$/))) { flush(); if (inUL) { html += '</ul>'; inUL = false; } if (!inOL) { html += '<ol>'; inOL = true; } html += '<li>' + inlineMd(m[2]) + '</li>'; continue; }
-      if ((m = line.match(/^[-*]\s+(.*)$/))) { flush(); if (inOL) { html += '</ol>'; inOL = false; } if (!inUL) { html += '<ul>'; inUL = true; } html += '<li>' + inlineMd(m[1]) + '</li>'; continue; }
+      if ((m = line.match(/^[-*•]\s+(.*)$/))) { flush(); if (inOL) { html += '</ol>'; inOL = false; } if (!inUL) { html += '<ul>'; inUL = true; } html += '<li>' + inlineMd(m[1]) + '</li>'; continue; }
       closeLists(); para.push(line);
     }
     if (fence !== null) html += codeBlock();
     flush(); closeLists();
     return html.replace(/\u0001(\d+)\u0001/g, (_, i) => maths[i]);
   }
-  // Colors code blocks after they are in the DOM (highlight.js works on elements).
   function highlightIn(el) {
     const blocks = el.querySelectorAll('pre code:not(.hljs)');
     if (!blocks.length || !hljsReady()) return;
@@ -442,10 +435,8 @@
   }
 
   /* ===================== text anchoring ===================== */
-  // Raw text of the content scope, as one string plus a node map. Range.toString() walks the same
-  // text nodes, so offsets from it line up with this string.
   function textIndex() {
-    const w = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
+    const w = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, { acceptNode: n => n.parentNode && n.parentNode.closest && n.parentNode.closest('az-annotate,script,style') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
     let full = '', segs = [], n;
     while ((n = w.nextNode())) { if (!n.nodeValue) continue; segs.push({ node: n, start: full.length, end: full.length + n.nodeValue.length }); full += n.nodeValue; }
     return { full, segs };
@@ -455,8 +446,7 @@
     while (lo < hi) { const mid = (lo + hi) >> 1; if (segs[mid].end < pos) lo = mid + 1; else hi = mid; }
     const s = segs[lo]; return { node: s.node, offset: Math.max(0, Math.min(pos - s.start, s.node.nodeValue.length)) };
   }
-  const normWS = s => (s || '').replace(/\s+/g, ' ');
-  function normIndex(full) {   // whitespace-collapsed copy + map back to raw offsets
+  function normIndex(full) {
     let norm = '', map = [], ws = false;
     for (let i = 0; i < full.length; i++) {
       const c = full.charCodeAt(i), isWS = c === 32 || c === 10 || c === 9 || c === 13 || c === 12 || c === 160;
@@ -465,11 +455,9 @@
     map.push(full.length);
     return { norm, map };
   }
-  function tailMatch(a, b) { let n = 0; while (n < a.length && n < b.length && a[a.length - 1 - n] === b[b.length - 1 - n]) n++; return n; }
-  function headMatch(a, b) { let n = 0; while (n < a.length && n < b.length && a[n] === b[n]) n++; return n; }
-  // Finds the occurrence of the anchored phrase whose surrounding text best matches the stored
-  // prefix/suffix. Whitespace is collapsed on both sides, so source indentation and the trimmed
-  // edges of a selection can't make it fall back to the first occurrence of a repeated phrase.
+  const tailMatch = (a, b) => { let n = 0; while (n < a.length && n < b.length && a[a.length - 1 - n] === b[b.length - 1 - n]) n++; return n; };
+  const headMatch = (a, b) => { let n = 0; while (n < a.length && n < b.length && a[n] === b[n]) n++; return n; };
+  // The occurrence of the phrase whose surroundings best match the stored prefix/suffix.
   function locateText(idx, anchor) {
     const ex = normWS(anchor.exact).trim(); if (!ex) return null;
     const pre = normWS(anchor.prefix).trimEnd(), suf = normWS(anchor.suffix).trimStart();
@@ -485,18 +473,24 @@
     const a = posToNode(idx.segs, map[best]), b = posToNode(idx.segs, map[best + ex.length - 1] + 1);
     const r = document.createRange(); r.setStart(a.node, a.offset); r.setEnd(b.node, b.offset); return r;
   }
-  function offsetOf(node, off) { const r = document.createRange(); r.setStart(content, 0); r.setEnd(node, off); return r.toString().length; }
+  // Offsets in the same text the index walks (it skips <style>/<script>, e.g. the style block inside
+  // a Mermaid SVG). Range.toString() would count those and shift every offset after a diagram.
+  function offsetOf(idx, node, off) {
+    if (node.nodeType === 3) { const g = idx.segs.find(x => x.node === node); if (g) return g.start + Math.min(off, node.nodeValue.length); }
+    const r = document.createRange();
+    if (node.nodeType === 3) r.setStartAfter(node); else r.setStart(node, off);
+    r.collapse(true);
+    for (const g of idx.segs) if (r.comparePoint(g.node, 0) >= 0) return g.start;
+    return idx.full.length;
+  }
   function anchorFromRange(range) {
-    const { full } = textIndex();
-    let s = offsetOf(range.startContainer, range.startOffset), e = offsetOf(range.endContainer, range.endOffset);
+    const idx = textIndex(), full = idx.full;
+    let s = offsetOf(idx, range.startContainer, range.startOffset), e = offsetOf(idx, range.endContainer, range.endOffset);
     while (s < e && /\s/.test(full[s])) s++;
     while (e > s && /\s/.test(full[e - 1])) e--;
-    const exact = normWS(full.slice(s, e));
-    return { type: 'text', exact, prefix: normWS(full.slice(Math.max(0, s - 32), s)), suffix: normWS(full.slice(e, e + 32)) };
+    return { type: 'text', exact: normWS(full.slice(s, e)), prefix: normWS(full.slice(Math.max(0, s - 32), s)), suffix: normWS(full.slice(e, e + 32)) };
   }
-  function wrapRange(range, id, done) {
-    // Wrap each intersecting text node in its own <mark>, never touching element structure.
-    const cls = 'az-hl' + (done ? ' az-done' : '');
+  function wrapRange(range, id) {
     try {
       const nodes = [];
       const w = document.createTreeWalker(range.commonAncestorContainer.nodeType === 3 ? range.commonAncestorContainer.parentNode : range.commonAncestorContainer, NodeFilter.SHOW_TEXT, {
@@ -505,8 +499,7 @@
       let n; while ((n = w.nextNode())) nodes.push(n);
       const sc = range.startContainer, so = range.startOffset, ec = range.endContainer, eo = range.endOffset;
       nodes.forEach(node => {
-        const start = node === sc ? so : 0;
-        const end = node === ec ? eo : node.nodeValue.length;
+        const start = node === sc ? so : 0, end = node === ec ? eo : node.nodeValue.length;
         if (start >= end) return;
         const middle = start > 0 ? node.splitText(start) : node;
         if (end - start < middle.nodeValue.length) middle.splitText(end - start);
@@ -514,7 +507,7 @@
         const p = middle.parentNode;
         // <mark> is HTML — inside SVG it is invalid and the label vanishes; skip non-HTML parents.
         if (!p || p.namespaceURI !== 'http://www.w3.org/1999/xhtml' || /^(script|style|textarea|title)$/i.test(p.nodeName)) return;
-        const mark = document.createElement('mark'); mark.className = cls; mark.dataset.tid = id;
+        const mark = document.createElement('mark'); mark.className = 'az-hl'; mark.dataset.tid = id;
         p.insertBefore(mark, middle); mark.appendChild(middle);
       });
     } catch (e) {}
@@ -523,6 +516,7 @@
     if (el.id) return '#' + CSS.escape(el.id);
     const parts = [];
     while (el && el !== content && el.nodeType === 1) {
+      if (el.id) { parts.unshift('#' + CSS.escape(el.id)); return parts.join('>'); }
       let p = el.tagName.toLowerCase();
       const sib = Array.from(el.parentNode.children).filter(c => c.tagName === el.tagName);
       if (sib.length > 1) p += ':nth-of-type(' + (sib.indexOf(el) + 1) + ')';
@@ -531,47 +525,30 @@
     return parts.join('>');
   }
   function elFromAnchor(a) {
-    let el = null; try { el = a.sel ? content.querySelector(a.sel) : null; } catch (e) {}
-    if (el) return el;
-    if (a.tag) { const c = [...content.querySelectorAll(a.tag)]; el = c.find(e => e.textContent.trim().slice(0, 120) === a.text) || c.find(e => a.text && e.textContent.trim().slice(0, 60) === a.text.slice(0, 60)); }
+    let el = null;
+    try { el = a.sel ? (a.sel[0] === '#' ? document.querySelector(a.sel) : content.querySelector(':scope>' + a.sel) || content.querySelector(a.sel)) : null; } catch (e) {}
+    const txt = normWS(a.text || '').trim();
+    if (el && (!txt || normWS(el.textContent || '').trim().startsWith(txt.slice(0, 40)))) return el;
+    // the text under the selector changed: look for the text elsewhere; if it is gone too, the
+    // block at the same position is the best guess (docs often get rewritten in place)
+    if (a.tag && txt) {
+      const c = [...content.querySelectorAll(a.tag)];
+      const byText = c.find(e => normWS(e.textContent || '').trim().slice(0, 120) === txt) || c.find(e => normWS(e.textContent || '').trim().startsWith(txt.slice(0, 60)));
+      if (byText) return byText;
+    }
     return el || null;
   }
 
-  /* ===================== marks (host page) + pins/regions (overlay) ===================== */
-  // syncMarks() rewrites the host-page marks — only needed when threads are added/removed or change
-  // state. layoutPins() only repositions the overlay, so rail toggles, resizes and reflows are cheap
-  // and never touch the host DOM (or the reader's current text selection).
-  let order = [];
-  const pins = {}, regions = {};
-  function clearHostMarks() {
-    const parents = new Set();
-    content.querySelectorAll('mark.az-hl').forEach(m => { const p = m.parentNode; while (m.firstChild) p.insertBefore(m.firstChild, m); p.removeChild(m); parents.add(p); });
-    parents.forEach(p => p.normalize && p.normalize());
-    content.querySelectorAll('.az-el-mark').forEach(e => e.classList.remove('az-el-mark', 'az-done', 'az-focus'));
+  /* ===================== regions pinned to what they cover ===================== */
+  // A region is pinned to the page pieces it was drawn over (a.els), its edges saved as fractions of
+  // their joint bounds (a.f) or fixed pixel margins (a.m), so it follows them when text rewraps.
+  // Content-wide fractions (x/y/w/h) are the fallback, and what the bridge uses for pictures.
+  function regionEl(sel) { try { return content.querySelector(sel); } catch (e) { return null; } }
+  function unionRect(els) {
+    let l = 1e9, t = 1e9, r = -1e9, b = -1e9;
+    els.forEach(e => { const q = e.getBoundingClientRect(); if (!q.width && !q.height) return; l = Math.min(l, q.left); t = Math.min(t, q.top); r = Math.max(r, q.right); b = Math.max(b, q.bottom); });
+    return r > l ? { left: l, top: t, width: r - l, height: b - t } : null;
   }
-  function syncMarks() {
-    clearHostMarks();
-    const idx = textIndex();
-    const ranges = [];
-    for (const id in threads) {
-      const t = threads[id], done = stateOf(t) === 'done';
-      if (t.type === 'text' && t.anchor && idx.segs.length) { const r = locateText(idx, t.anchor); if (r) ranges.push([r, id, done]); }
-      else if (t.type === 'element') { const e = elFromAnchor(t.anchor || {}); if (e) { e.classList.add('az-el-mark'); if (done) e.classList.add('az-done'); } }
-    }
-    ranges.forEach(([r, id, done]) => wrapRange(r, id, done));   // live ranges survive earlier splits
-    upgradeRegions(); layoutPins();
-  }
-  function markRect(id) {
-    const t = threads[id]; if (!t) return null;
-    if (t.type === 'text') { const m = content.querySelector('mark.az-hl[data-tid="' + id + '"]'); return m && m.getClientRects()[0]; }
-    if (t.type === 'region') return regionRect(t.anchor);
-    if (t.type === 'element') { const e = elFromAnchor(t.anchor || {}); return e && e.getBoundingClientRect(); }
-  }
-  // A region is pinned to the page pieces it was drawn over (a.els). Each box edge is saved as a
-  // fraction of their joint bounds (a.f: left, top, right, bottom), or, where the edge sits
-  // outside them, as a fixed pixel margin (a.m) so slack around a paragraph doesn't grow when it
-  // rewraps. When the sidebar or window size makes the text rewrap, the box follows those pieces.
-  // The content-wide fractions (x/y/w/h) are the fallback, and what the bridge uses.
   function regionRect(a) {
     const u = a.els && a.f && unionRect(a.els.map(regionEl).filter(Boolean));
     if (u && u.width && u.height) {
@@ -583,22 +560,13 @@
     const cr = content.getBoundingClientRect(), bx = cr.left + content.clientLeft, by = cr.top + content.clientTop;
     return { left: bx + a.x * content.offsetWidth, top: by + a.y * content.offsetHeight, width: a.w * content.offsetWidth, height: a.h * content.offsetHeight };
   }
-  function regionEl(sel) { try { return content.querySelector(sel); } catch (e) { return null; } }
-  function unionRect(els) {
-    let l = 1e9, t = 1e9, r = -1e9, b = -1e9;
-    els.forEach(e => { const q = e.getBoundingClientRect(); if (!q.width && !q.height) return; l = Math.min(l, q.left); t = Math.min(t, q.top); r = Math.max(r, q.right); b = Math.max(b, q.bottom); });
-    return r > l ? { left: l, top: t, width: r - l, height: b - t } : null;
-  }
-  // The smallest set of blocks that together cover the box: blocks fully inside it, or the deepest
-  // block it cuts through (a diagram, a formula, a paragraph). Inline bits never count, so a box
-  // over half a paragraph pins to the paragraph, not to one bold word in it.
   const LEAF = /^(svg|img|canvas|video|picture|iframe|pre|table|math)$/i;
   function regionPieces(box) {
     const hit = q => Math.max(0, Math.min(q.right, box.right) - Math.max(q.left, box.left)) * Math.max(0, Math.min(q.bottom, box.bottom) - Math.max(q.top, box.top));
     const boxA = (box.right - box.left) * (box.bottom - box.top), out = [];
     const walk = el => {
       for (const c of el.children) {
-        if (/^(az-annotate|script|style|template)$/i.test(c.tagName) || c.classList.contains('az-hl')) continue;
+        if (/^(az-annotate|az-box|script|style|template)$/i.test(c.tagName) || c.classList.contains('az-hl')) continue;
         const q = c.getBoundingClientRect(), a = q.width * q.height, h = hit(q);
         if (!a || h < Math.max(16, boxA * 0.02)) continue;
         const blockKids = !LEAF.test(c.tagName) && [...c.children].some(k => !/^inline/.test(getComputedStyle(k).display) && hit(k.getBoundingClientRect()) > 0);
@@ -617,396 +585,633 @@
     return { els: sels, f: [r4((box.left - u.left) / u.width), r4((box.top - u.top) / u.height), r4((box.right - u.left) / u.width), r4((box.bottom - u.top) / u.height)],
       m: [px(u.left - box.left), px(u.top - box.top), px(box.right - ur), px(box.bottom - ub)] };
   }
-  // Boxes drawn before pieces were saved: pin them now if the page is laid out as when drawn.
-  function upgradeRegions() {
-    let changed = false;
-    for (const id in threads) {
-      const t = threads[id], a = t.anchor;
-      if (t.type !== 'region' || !a || a.els || !a.vw) continue;
-      const v = viewSize(); if (v.vw !== a.vw || v.pad !== a.pad) continue;
-      const r = regionRect(a), more = regionAnchorEls({ left: r.left, top: r.top, right: r.left + r.width, bottom: r.top + r.height });
-      if (more) { Object.assign(a, more); changed = true; }
-    }
-    if (changed) persist();
-  }
-  let layoutRaf = 0;
-  function scheduleLayout() { cancelAnimationFrame(layoutRaf); layoutRaf = requestAnimationFrame(layoutPins); }
-  function layoutPins() {
-    const lr = layer.getBoundingClientRect(), cr = content.getBoundingClientRect();
-    const railOpen = ui.classList.contains('railopen');
-    const limit = innerWidth - (railOpen && innerWidth > 760 ? railW : 0);
-    const inGutter = cr.right + 34 <= limit;
-    const rects = {};
-    order = Object.keys(threads).map(id => { const r = markRect(id); rects[id] = r; return { id, y: r ? r.top : 1e9 }; }).sort((a, b) => a.y - b.y).map(o => o.id);
-    const live = new Set();
-    let prevTop = null, stack = 0;
-    order.forEach(id => {
-      const t = threads[id], r = rects[id], st = stateOf(t); if (!r) return;
-      live.add(id);
-      if (t.type === 'region') {
-        const b = regions[id] || (regions[id] = layer.appendChild(Object.assign(document.createElement('div'), { className: 'region' })));
-        b.dataset.tid = id; b.classList.toggle('done', st === 'done');
-        Object.assign(b.style, { left: (r.left - lr.left) + 'px', top: (r.top - lr.top) + 'px', width: r.width + 'px', height: r.height + 'px' });
-      }
-      const pin = pins[id] || (pins[id] = makePin(id));
-      pin.className = 'pin' + (st === 'done' ? ' done' : '');
-      const uc = t.messages.filter(m => m.role === 'user').length;
-      pin.textContent = st === 'done' ? '✓' : (uc ? String(uc) : '·');
-      const top = r.top - lr.top + (t.type === 'text' ? Math.max(0, (r.height - 20) / 2) : 2);
-      stack = (prevTop !== null && Math.abs(top - prevTop) < 22) ? stack + 1 : 0; prevTop = top;
-      // Pins sit in the gutter right of the content so they never cover words; when there is no
-      // gutter (content touches the viewport/rail) they tuck just inside the right edge.
-      let x = inGutter ? cr.right + 8 + stack * 24 : cr.right - 26 - stack * 24;
-      if (inGutter && x + 22 > limit) x = cr.right - 26 - (stack - Math.floor((limit - cr.right - 30) / 24)) * 24;   // gutter full → continue inside
-      pin.style.left = (x - lr.left) + 'px'; pin.style.top = top + 'px';
-    });
-    for (const id in pins) if (!live.has(id)) { pins[id].remove(); delete pins[id]; }
-    for (const id in regions) if (!live.has(id) || threads[id].type !== 'region') { regions[id].remove(); delete regions[id]; }
-  }
-  function makePin(id) {
-    const pin = document.createElement('button'); pin.dataset.tid = id;
-    pin.onclick = e => { e.stopPropagation(); openThread(pin.dataset.tid); };
-    pin.onmouseenter = () => focusMark(id, true); pin.onmouseleave = () => focusMark(id, false);
-    layer.appendChild(pin); return pin;
-  }
-  function focusMark(id, on) {
-    const t = threads[id]; if (!t) return;
-    if (t.type === 'text') content.querySelectorAll('mark.az-hl[data-tid="' + id + '"]').forEach(m => m.classList.toggle('az-focus', on));
-    if (t.type === 'region' && regions[id]) regions[id].classList.toggle('focus', on);
-    if (t.type === 'element') { const e = elFromAnchor(t.anchor || {}); e && e.classList.toggle('az-focus', on); }
-    pins[id] && pins[id].classList.toggle('focus', on);
-    const c = cards.get(id); c && c.el.classList.toggle('focus', on);
+  // The window size and the page push (padding-right on <html>), so the bridge lays the page out the same way.
+  function viewSize() { return { vw: HTML.clientWidth, vh: innerHeight, pad: Math.round(parseFloat(getComputedStyle(HTML).paddingRight) || 0) }; }
+  function nearestHeading(clientTop) {
+    let best = 'the top';
+    content.querySelectorAll('h1,h2,h3,h4').forEach(h => { if (h.getBoundingClientRect().top <= clientTop + 20) best = h.textContent; });
+    return normWS(best).trim().slice(0, 48);
   }
 
-  /* ===================== rail: keyed cards, persistent composer ===================== */
-  // Cards are updated in place and only when their own content changes, so another thread's
-  // answer arriving (or a filter click) can't wipe a half-typed follow-up or the reader's
-  // selection inside an answer.
-  const TYPE = { text: '✎ text', region: '▭ region', element: '◎ element' };
-  const cards = new Map();   // id -> { el, sig, composer }
-  function whoLabel(m) { return m.role === 'user' ? 'You' : (m.by || 'Claude'); }
-  function cardSig(id) {
-    const t = threads[id], a = answering[id];
-    return [stateOf(t), id === openId, t.label, shots[id], t.messages.length, t.messages.map(m => (m.text || '').length + (m.by || '')).join(','), a ? 'busy' : ''].join('|');
+  /* ===================== marks + boxes in the host page ===================== */
+  let draft = null;                 // { anchor, label, top, bottom, box?, target? } while a new comment is written
+  let active = null;                // focused thread id
+  const boxes = {};                 // id -> <az-box> for region and element threads
+  const targets = {};               // id -> element a picked block points at
+  function clearMarks() {
+    const parents = new Set();
+    content.querySelectorAll('mark.az-hl').forEach(m => { const p = m.parentNode; while (m.firstChild) p.insertBefore(m.firstChild, m); p.removeChild(m); parents.add(p); });
+    parents.forEach(p => p.normalize && p.normalize());
   }
-  function composerFor(id) {
-    const wrap = document.createElement('div'); wrap.className = 'compose';
-    wrap.innerHTML = '<textarea placeholder="Ask about this…"></textarea><div class="row"><span class="hint">⌘/Ctrl+Enter to send</span>'
-      + '<button class="btn ghost danger" data-del>Delete</button><button class="btn primary" data-save>Send</button></div>';
-    const ta = wrap.querySelector('textarea');
-    ta.value = drafts[id] || '';
-    ta.addEventListener('input', () => { if (ta.value) drafts[id] = ta.value; else delete drafts[id]; persistDrafts(); });
-    ta.addEventListener('keydown', e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); saveMsg(id); } e.stopPropagation(); });
-    wrap.querySelector('[data-save]').onclick = e => { e.stopPropagation(); saveMsg(id); };
-    wrap.querySelector('[data-del]').onclick = e => { e.stopPropagation(); deleteThread(id); };
-    return wrap;
+  function syncMarks() {
+    clearMarks();
+    const idx = textIndex(), ranges = [];
+    if (idx.segs.length) {
+      for (const id in threads) { const t = threads[id]; if (t.type === 'text' && t.anchor) { const r = locateText(idx, t.anchor); if (r) ranges.push([r, id]); } }
+      if (draft && draft.anchor.type === 'text') { const r = locateText(idx, draft.anchor); if (r) ranges.push([r, DRAFT]); }
+    }
+    ranges.forEach(([r, id]) => wrapRange(r, id));
+    applyMarkState();
   }
-  function uiSelectionText() {
-    const s = (root.getSelection && root.getSelection()) || document.getSelection();
-    return s && !s.isCollapsed ? s.toString().trim() : '';
+  function applyMarkState(hoverId) {
+    const on = active || hoverId;
+    content.querySelectorAll('mark.az-hl').forEach(m => {
+      const id = m.dataset.tid, t = threads[id];
+      m.classList.toggle('az-gone', !!(t && t.resolved));
+      m.classList.toggle('az-on', id === DRAFT || (!!on && id === on && !(t && t.resolved)));
+    });
+    for (const id in boxes) { const t = threads[id]; boxes[id].classList.toggle('az-gone', !!(t && t.resolved)); boxes[id].classList.toggle('az-on', !!on && id === on); }
+    if (draft && draft.box) draft.box.classList.add('az-on');
+    for (const [k, el] of railEls) el.classList.toggle('on', k === active);
+    for (const [k, el] of panelEls) el.classList.toggle('on', k === on);
   }
-  function buildCard(id) {
-    const el = document.createElement('div'); el.dataset.tid = id;
-    const c = { el, sig: null, composer: null };
-    el.addEventListener('mouseenter', () => focusMark(id, true));
-    el.addEventListener('mouseleave', () => focusMark(id, false));
-    el.addEventListener('mousedown', e => { c.down = [e.clientX, e.clientY]; });
+  function ensureRelative(c) { if (getComputedStyle(c).position === 'static') { c.style.position = 'relative'; c.setAttribute('data-az-rel', ''); } }
+  // Puts a box over a client rect. Inside a sideways-scrolling block it lives in that block, so it
+  // scrolls and clips with it; otherwise it sits in the page.
+  function placeBox(b, rect, container) {
+    const parent = container || document.body;
+    if (container) ensureRelative(container);
+    if (b.parentElement !== parent) parent.appendChild(b);
+    let ox, oy;
+    if (container) { const c = container.getBoundingClientRect(); ox = c.left + container.clientLeft - container.scrollLeft; oy = c.top + container.clientTop - container.scrollTop; }
+    else if (getComputedStyle(document.body).position === 'static') { ox = -scrollX; oy = -scrollY; }
+    else { const c = document.body.getBoundingClientRect(); ox = c.left + document.body.clientLeft; oy = c.top + document.body.clientTop; }
+    Object.assign(b.style, { left: (rect.left - ox) + 'px', top: (rect.top - oy) + 'px', width: rect.width + 'px', height: rect.height + 'px' });
+  }
+  function placeAnchorBox(b, anchor, target) {
+    if (target) {
+      if (!target.isConnected) return false;
+      const r = target.getBoundingClientRect(), p = 3;
+      placeBox(b, { left: r.left - p, top: r.top - p, width: r.width + p * 2, height: r.height + p * 2 }, scrollerOf(target));
+      return true;
+    }
+    const sc = anchor.scroll && scrollers()[anchor.scroll.i];
+    if (sc) {   // drawn on a sideways-scrolling block: stored in that block's own coordinates
+      ensureRelative(sc);
+      if (b.parentElement !== sc) sc.appendChild(b);
+      Object.assign(b.style, { left: anchor.scroll.x + 'px', top: anchor.scroll.y + 'px', width: anchor.scroll.w + 'px', height: anchor.scroll.h + 'px' });
+      return true;
+    }
+    placeBox(b, regionRect(anchor), null);
+    return true;
+  }
+  function layoutBoxes() {
+    const live = new Set();
+    for (const id in threads) {
+      const t = threads[id]; if (t.type !== 'region' && t.type !== 'element') continue;
+      let tg = null;
+      if (t.type === 'element') { tg = targets[id]; if (!tg || !tg.isConnected) tg = targets[id] = elFromAnchor(t.anchor || {}); if (!tg) continue; }
+      const b = boxes[id] || (boxes[id] = Object.assign(document.createElement('az-box'), {}));
+      b.dataset.tid = id;
+      if (placeAnchorBox(b, t.anchor || {}, tg)) live.add(id);
+    }
+    for (const id in boxes) if (!live.has(id)) { boxes[id].remove(); delete boxes[id]; }
+    if (draft && draft.box) placeAnchorBox(draft.box, draft.anchor, draft.target);
+    applyMarkState();
+  }
+  function anchorBox(id) {
+    let rs = [];
+    if (boxes[id]) rs = [boxes[id].getBoundingClientRect()];
+    else content.querySelectorAll('mark.az-hl[data-tid="' + id + '"]').forEach(m => { const q = m.getClientRects(); for (const r of q) rs.push(r); });
+    if (!rs.length) { const t = threads[id]; if (t && t.type === 'region' && t.anchor) rs = [regionRect(t.anchor)]; }
+    if (!rs.length) return null;
+    return { top: Math.min(...rs.map(r => r.top)) + scrollY, bottom: Math.max(...rs.map(r => r.top + r.height)) + scrollY };
+  }
+  // boxes ignore the pointer (so scrolling over a figure still works); clicks and hover find them by position
+  function boxAt(x, y) {
+    for (const id in boxes) {
+      const t = threads[id]; if (!t || t.resolved) continue;
+      const r = boxes[id].getBoundingClientRect(); if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
+      const sc = boxes[id].parentElement !== document.body && boxes[id].parentElement;
+      if (sc) { const c = sc.getBoundingClientRect(); if (x < c.left || x > c.right || y < c.top || y > c.bottom) continue; }
+      return id;
+    }
+    return null;
+  }
+
+  /* ===================== layout: margin cards at the right edge ===================== */
+  const CARD_W = 284, EDGE = 24, GAP = 32, PIN = 64;
+  let railFits = false;
+  const panelOpen = () => ui.classList.contains('panel-open');
+  // How far the page is pushed to make room for the cards depends only on the window — never on
+  // how many comments exist — so adding the first comment moves nothing.
+  function measureRoom() {
+    HTML.classList.remove('az-pad'); HTML.style.removeProperty('--az-pad');
+    const W = HTML.clientWidth, cardX = W - CARD_W - EDGE;
+    if (W < 1000) { railFits = false; return; }
+    let cr = content.getBoundingClientRect();
+    if (cr.right + GAP <= cardX) { railFits = true; return; }
+    const push = p => { HTML.style.setProperty('--az-pad', p + 'px'); HTML.classList.add('az-pad'); return content.getBoundingClientRect(); };
+    let p = Math.ceil(2 * (cr.right + GAP - cardX));          // a centred column moves by half the push
+    cr = push(p);
+    if (cr.right + GAP > cardX + 1) { p = W - cardX + GAP; cr = push(p); }   // a fluid page: reserve the whole column
+    railFits = cr.right + GAP <= cardX + 1 && W - p >= 560;
+    if (!railFits) { HTML.classList.remove('az-pad'); HTML.style.removeProperty('--az-pad'); }
+  }
+  const railEls = new Map(), panelEls = new Map();
+  let stack = [];
+
+  /* ===================== cards ===================== */
+  let BRIDGE = false, MODELS = null;
+  let choice = readLS(CHOICEKEY, null);
+  const answering = {};            // id -> { text, by } while an answer streams in
+  const shots = {};                // region picture state: 'probe' | 'wait' | 'ok' | 'none'
+  function author(by) {
+    const s = String(by || 'Claude'), codex = /^codex\b/i.test(s);
+    return { name: codex ? 'Codex' : 'Claude', codex, model: s.replace(/^(claude|codex)\s*·?\s*/i, '').replace(/\s*\(([^)]+)\)\s*$/, ' · $1').trim() };
+  }
+  const avatarHTML = w => w.codex ? `<span class="av codex">${I.codex}</span>` : `<span class="av claude">${I.spark}</span>`;
+  const timeStr = at => at ? new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+  function msgsHTML(id) {
+    const t = threads[id]; if (!t) return '';
+    let h = t.messages.map((m, i) => {
+      const isC = m.role !== 'user', w = isC ? author(m.by) : null;
+      const acts = i !== 0 ? '' : t.resolved
+        ? `<button class="ib" data-act="reopen" title="Reopen" aria-label="Reopen">${I.undo}</button><button class="ib" data-act="delete" title="Delete" aria-label="Delete">${I.trash}</button>`
+        : `<button class="ib" data-act="resolve" title="Resolve" aria-label="Resolve">${I.resolve}</button>`;
+      return `<div class="msg ${isC ? 'reply' : ''}"><div class="who">${isC ? avatarHTML(w) : '<span class="av you">Y</span>'}
+        <span class="name">${isC ? w.name : 'You'}</span>${m.at ? `<span class="time">${timeStr(m.at)}</span>` : ''}
+        ${isC && w.model ? `<span class="by" title="${esc(w.model)}">${esc(w.model)}</span>` : ''}
+        ${acts ? `<span class="acts" role="toolbar" aria-label="Comment actions">${acts}</span>` : ''}</div>
+        <div class="body">${isC ? md(m.text) : '<p>' + esc(m.text).replace(/\n/g, '<br>') + '</p>'}</div></div>`;
+    }).join('');
+    const a = answering[id];
+    if (a && a.text) { const w = author(a.by); h += `<div class="msg reply streaming"><div class="who">${avatarHTML(w)}<span class="name">${w.name}</span>${w.model ? `<span class="by">${esc(w.model)}</span>` : ''}</div><div class="body">${md(a.text)}</div></div>`; }
+    else if (a) { const w = author(a.by); h += `<div class="msg reply"><div class="who">${avatarHTML(w)}<span class="thinking">Thinking</span></div></div>`; }
+    else if (!BRIDGE && pendingQuestions(t).length) h += `<div class="msg"><div class="note">Not answered yet. Use “Copy questions” in the Comments panel and paste them into any Claude chat.</div></div>`;
+    return h;
+  }
+  function makeField(id, bare) {
+    const f = document.createElement('div'); f.className = 'field' + (bare ? ' bare' : '');
+    const ph = id ? 'Reply…' : 'Ask Claude…';
+    f.innerHTML = `<div class="ed" contenteditable="true" role="textbox" aria-multiline="true" aria-label="${id ? 'Reply' : 'Ask Claude'}" data-ph="${ph}"></div>
+      <div class="frow"><div>${BRIDGE ? `<button class="model" title="Model">${esc(modelShort())} ${I.caret}</button>` : ''}
+      <button class="send" aria-label="Send" title="Send (↵)" disabled>${I.up}</button></div></div>`;
+    const ed = f.querySelector('.ed'), send = f.querySelector('.send');
+    const text = () => ed.innerText.trim();
+    const upd = () => { const ok = !!text(); send.classList.toggle('ready', ok); send.disabled = !ok; };
+    const dkey = id || DRAFT;
+    if (drafts[dkey] && id) { ed.textContent = drafts[dkey]; upd(); }
+    ed.addEventListener('input', () => { if (!text()) ed.textContent = ''; upd(); if (id) { if (text()) drafts[id] = ed.innerText; else delete drafts[id]; persistDrafts(); } });
+    ed.addEventListener('paste', e => { e.preventDefault(); const s = (e.clipboardData || window.clipboardData).getData('text/plain'); document.execCommand('insertText', false, s); });
+    ed.addEventListener('focus', () => f.classList.add('focus'));
+    ed.addEventListener('blur', () => setTimeout(() => { if (!f.contains(root.activeElement) && !text()) f.classList.remove('focus'); }, 120));
+    f.addEventListener('mousedown', e => { if (!e.target.closest('button')) { e.stopPropagation(); setTimeout(() => ed.focus()); } });
+    const go = () => { const q = text(); if (q) submit(id, q); };
+    send.addEventListener('click', e => { e.stopPropagation(); go(); });
+    ed.addEventListener('keydown', e => {
+      e.stopPropagation();
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); go(); }
+      if (e.key === 'Escape') { e.preventDefault(); if (draft) cancelDraft(); else { active = null; render(); } }
+    });
+    const mb = f.querySelector('.model'); if (mb) mb.addEventListener('click', e => { e.stopPropagation(); openModelMenu(mb); });
+    return f;
+  }
+  function makeCard(kind, id) {
+    const el = document.createElement('div'); el.className = kind + ' enter'; el.dataset.t = id;
+    el.innerHTML = kind === 'card'
+      ? '<div class="inner"><div class="msgwrap"><div class="scroll"><div class="msgs"></div></div></div><div class="slot"></div></div><button class="seemore" tabindex="-1">' + I.down + 'See more</button>'
+      : '<div class="quote"></div><div class="scroll"><div class="msgs"></div></div><div class="rtag" hidden>' + I.check + 'Resolved</div><div class="slot"></div>';
+    el.addEventListener('mouseenter', () => { if (!active) applyMarkState(el.dataset.t); });
+    el.addEventListener('mouseleave', () => { if (!active) applyMarkState(null); });
     el.addEventListener('click', e => {
-      if (e.target.closest('button,textarea,a,input,select')) return;
-      const d = c.down; if (d && Math.hypot(e.clientX - d[0], e.clientY - d[1]) > 4) return;   // a drag-select, not a click
-      if (e.detail > 1 || uiSelectionText()) return;                                            // double/triple-click selects words
-      if (id !== openId) openThread(id, { fromCard: true });
-      else if (e.target.closest('.lbl')) scrollToMark(id);
+      const tid = el.dataset.t; if (tid === DRAFT || !threads[tid]) return;
+      const b = e.target.closest('[data-act]');
+      if (b) { e.stopPropagation(); act(tid, b.dataset.act, b); return; }
+      if (e.target.closest('.field,a,.seemore')) return;
+      if (active !== tid) { draft = null; activate(tid, panelOpen()); }
     });
-    cards.set(id, c); return c;
-  }
-  function renderCard(id, c) {
-    const t = threads[id], s = stateOf(t), open = id === openId, busy = answering[id];
-    c.el.className = 'card ' + (s === 'done' ? 'done ' : s === 'hl' ? 'hlonly ' : '') + (open ? 'active' : '');
-    const composer = open ? (c.composer || (c.composer = composerFor(id))) : null;
-    const ta = composer && composer.querySelector('textarea');
-    const hadFocus = ta && root.activeElement === ta, selA = ta && ta.selectionStart, selB = ta && ta.selectionEnd;
-    if (composer && composer.parentNode) composer.remove();
-    if (!open) c.composer = null;
-    const badge = busy ? '<span class="st busy">Answering…</span>' : s === 'hl' ? '' : '<span class="st ' + (s === 'done' ? 'doneb' : 'open') + '">' + (s === 'done' ? 'Answered' : 'Open') + '</span>';
-    let html = '<div class="top"><span class="type">' + (TYPE[t.type] || t.type) + '</span>' + badge
-      + (open ? '<button class="collapse" data-collapse title="Collapse">▾</button>' : '') + '</div>'
-      + (shots[id] === 'ok'   // region with a picture: show what the model sees, not the heading guess
-        ? '<div class="lbl pic" title="' + (open ? 'Show in page' : '') + '"><img class="shot" alt="Picture of the boxed area" src="' + esc(shotUrl(id)) + '"></div>'
-        : '<div class="lbl" title="' + (open ? 'Show in page' : '') + '">“' + esc(t.label) + '”' + (shots[id] === 'wait' ? ' · taking picture…' : '') + '</div>');
-    if (open) {
-      html += '<div class="msgs">';
-      t.messages.forEach(m => { html += '<div class="msg ' + (m.role === 'user' ? 'user' : 'claude') + '"><span class="who">' + esc(whoLabel(m)) + '</span><div class="bubble">' + md(m.text) + '</div></div>'; });
-      if (busy) html += '<div class="msg claude stream"><span class="who">' + esc(busy.by || 'Claude') + '</span>' + (busy.text ? '<div class="bubble">' + md(busy.text) + '</div>' : '<div class="skel"><div class="skline"></div><div class="skline"></div><div class="skline"></div></div>') + '</div>';
-      html += '</div>';
-    } else {
-      const q = (t.messages.find(m => m.role === 'user') || {}).text || '';
-      if (q) html += '<div class="q">' + esc(q) + '</div>';
+    const sc = el.querySelector('.scroll');
+    if (kind === 'card') {
+      sc.addEventListener('scroll', () => overflowCheck(el), { passive: true });
+      el.querySelector('.seemore').addEventListener('click', e => { e.stopPropagation(); sc.scrollBy({ top: sc.clientHeight * 0.8, behavior: reduced() ? 'auto' : 'smooth' }); });
     }
-    c.el.innerHTML = html;
-    highlightIn(c.el);
-    if (open) {
-      c.el.appendChild(composer);
-      c.el.querySelector('[data-collapse]').onclick = e => { e.stopPropagation(); closeThread(); };
-      if (hadFocus) { ta.focus({ preventScroll: true }); try { ta.setSelectionRange(selA, selB); } catch (e) {} }
+    return el;
+  }
+  function overflowCheck(el) {
+    const sc = el.querySelector('.scroll'); if (!sc || !el.classList.contains('card')) return;
+    const focused = el.classList.contains('on') || el.classList.contains('lifted');
+    el.classList.toggle('clipped', !focused && sc.scrollHeight > sc.clientHeight + 4);
+    el.classList.toggle('overflowing', focused && sc.scrollHeight - sc.clientHeight - sc.scrollTop > 8);
+  }
+  function fillCard(el, id, wantField) {
+    const msgs = el.querySelector('.msgs'), h = id === DRAFT ? '' : msgsHTML(id);
+    if (el._h !== h) {
+      const sc = el.querySelector('.scroll'), atEnd = sc && sc.scrollHeight - sc.clientHeight - sc.scrollTop < 24;
+      msgs.innerHTML = h; el._h = h; highlightIn(msgs);
+      if (sc && atEnd && answering[id]) sc.scrollTop = sc.scrollHeight;
     }
-    c.sig = cardSig(id);
+    const q = el.querySelector('.quote'), t = threads[id];
+    if (q && t) {
+      const kind = t.type === 'text' ? '' : `<span class="kind">${t.type === 'region' ? 'box' : 'block'}</span>`;
+      const shot = t.type === 'region' && shots[id] === 'ok' ? `<img class="shot" alt="" src="${shotUrl(id)}">` : '';
+      const qh = shot ? '' : kind + esc(t.label || '');
+      if (q._h !== qh + shot) { q.innerHTML = qh; q.hidden = !qh; q._h = qh + shot; let im = el.querySelector('.shot'); if (shot && !im) q.insertAdjacentHTML('beforebegin', shot); if (!shot && im) im.remove(); }
+    }
+    const rt = el.querySelector('.rtag'); if (rt) rt.hidden = !(t && t.resolved);
+    const slot = el.querySelector('.slot');
+    let fresh = null;
+    if (wantField && !slot.firstChild) { fresh = makeField(id === DRAFT ? null : id, id === DRAFT); slot.appendChild(fresh); }
+    if (!wantField && slot.firstChild) slot.innerHTML = '';
+    overflowCheck(el);
+    return fresh;
   }
-  function updateStream(id) {   // streaming deltas touch only the in-flight bubble
-    const c = cards.get(id), a = answering[id]; if (!c || !a || id !== openId) return;
-    const s = c.el.querySelector('.msg.stream'); if (!s) return;
-    let b = s.querySelector('.bubble');
-    if (!b) { const sk = s.querySelector('.skel'); b = document.createElement('div'); b.className = 'bubble'; sk ? sk.replaceWith(b) : s.appendChild(b); }
-    b.innerHTML = md(a.text);
-    highlightIn(b);
+  function leave(el, map, key) {
+    map.delete(key);
+    if (reduced()) { el.remove(); return; }
+    if (el.classList.contains('tcard')) { el.style.maxHeight = el.offsetHeight + 'px'; void el.offsetHeight; }
+    el.classList.add('leave');
+    setTimeout(() => el.remove(), 280);
   }
-  /* Region pictures: the bridge saves a picture of each box (the same one the model gets), and
-     the card shows it. Old region threads get one the first time the page sees them. */
-  function shotUrl(id) { return '/.annot-snaps/' + encodeURIComponent(baseName()) + '/' + id + '.png'; }
-  function ensureShot(id) {
-    const t = threads[id];
-    if (!BRIDGE || !t || t.type !== 'region' || shots[id]) return;
-    shots[id] = 'probe';
-    const done = v => { shots[id] = v; renderRail(); };
-    const img = new Image();
-    img.onload = () => done('ok');
-    img.onerror = () => {
-      done('wait');
-      fetch('/__annot/snap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base: baseName(), id, anchor: t.anchor, view: viewSize() }) })
-        .then(r => r.json()).then(j => done(j && j.ok ? 'ok' : 'none'), () => done('none'));
-    };
-    img.src = shotUrl(id);
-  }
+  function pageOrigin() { const r = host.getBoundingClientRect(); return { x: r.left + scrollX, y: r.top + scrollY }; }
+
   function renderRail() {
-    const ids = order.filter(id => threads[id]).concat(Object.keys(threads).filter(id => !order.includes(id)));
-    ids.forEach(ensureShot);
-    $('dockn').textContent = ids.length; $('dock').classList.toggle('has', ids.length > 0);
-    let openCount = 0, doneCount = 0;
-    ids.forEach(id => { if (stateOf(threads[id]) === 'done') doneCount++; else openCount++; });
-    $('cAll').textContent = ids.length; $('cOpen').textContent = openCount; $('cDone').textContent = doneCount;
-    const shown = ids.filter(id => { const s = stateOf(threads[id]); return filter === 'all' || (filter === 'open' ? s !== 'done' : s === 'done'); });
-    const empty = $('empty');
-    empty.style.display = shown.length ? 'none' : '';
-    if (!ids.length) empty.innerHTML = '<b>No annotations yet.</b><br><br>Click <b>💬</b> (bottom right) to turn on annotating, then:<br>• <b>Select text</b> → Comment pill appears<br>• <kbd>R</kbd> → drag a box over anything<br>• <kbd>E</kbd> → click a whole block';
-    else if (!shown.length) empty.textContent = 'Nothing in this filter.';
-    const want = new Set(shown);
-    for (const [id, c] of cards) if (!want.has(id)) { c.el.remove(); cards.delete(id); }
-    shown.forEach((id, i) => {
-      const c = cards.get(id) || buildCard(id);
-      if (c.sig !== cardSig(id)) renderCard(id, c);
-      const at = list.children[i + 1];   // +1: the empty-state div stays first
-      if (at !== c.el) list.insertBefore(c.el, at || null);
+    const show = railFits && !panelOpen();
+    const o = pageOrigin();
+    rail.style.left = (HTML.clientWidth - CARD_W - EDGE + scrollX - o.x) + 'px';
+    const items = !show ? [] : Object.keys(threads).filter(id => !threads[id].resolved).map(id => ({ id, box: anchorBox(id) })).filter(i => i.box);
+    if (show && draft) items.push({ id: DRAFT, box: { top: draft.top, bottom: draft.bottom } });
+    items.sort((a, b) => a.box.top - b.box.top);
+    const keep = new Set(items.map(i => i.id));
+    for (const [k, el] of [...railEls]) if (!keep.has(k)) { show ? leave(el, railEls, k) : (el.remove(), railEls.delete(k)); }
+    let focusEd = null; const fresh = [];
+    items.forEach(it => {
+      let el = railEls.get(it.id);
+      if (!el) { el = makeCard('card', it.id); rail.appendChild(el); railEls.set(it.id, el); fresh.push(el); el.style.transition = 'none'; sizeWatch.observe(el); }
+      const isFocus = it.id === DRAFT || it.id === active;
+      el.classList.toggle('lifted', it.id === DRAFT);
+      el.classList.toggle('on', it.id === active);
+      if (!isFocus) { const sc = el.querySelector('.scroll'); if (sc) sc.scrollTop = 0; }
+      const f = fillCard(el, it.id, isFocus && (it.id === DRAFT || !threads[it.id].resolved));
+      if (f && it.id === DRAFT) focusEd = f.querySelector('.ed');
+    });
+    // the focused card sits level with its anchor; the rest make room above and below it
+    const els = items.map(i => railEls.get(i.id)), pos = items.map(i => i.box.top - o.y);
+    let fi = items.findIndex(i => i.id === (draft ? DRAFT : active)); if (fi < 0) fi = 0;
+    for (let i = fi + 1; i < items.length; i++) pos[i] = Math.max(pos[i], pos[i - 1] + els[i - 1].offsetHeight + 8);
+    for (let i = fi - 1; i >= 0; i--) pos[i] = Math.min(pos[i], pos[i + 1] - els[i].offsetHeight - 8);
+    els.forEach((el, i) => { el._base = pos[i]; el._abottom = items[i].box.bottom - o.y; el.classList.remove('pinned'); });
+    stack = els;
+    pin(false);
+    if (fresh.length) { void rail.offsetHeight; fresh.forEach(el => { el.style.transition = ''; }); requestAnimationFrame(() => fresh.forEach(el => el.classList.remove('enter'))); }
+    if (focusEd) focusEd.focus({ preventScroll: true });
+  }
+  /* The focused card stays on screen while its anchor is; cards below are pushed along, so nothing overlaps. */
+  function pin(fromScroll) {
+    const focus = railEls.get(draft ? DRAFT : active), fi = stack.indexOf(focus), tops = stack.map(el => el._base);
+    if (fi >= 0) {
+      const min = scrollY - pageOrigin().y + PIN;
+      if (tops[fi] < min) tops[fi] = Math.max(tops[fi], Math.min(min, focus._abottom - 32));
+      for (let i = fi + 1; i < stack.length; i++) tops[i] = Math.max(stack[i]._base, tops[i - 1] + stack[i - 1].offsetHeight + 8);
+    }
+    stack.forEach((el, i) => {
+      const moving = Math.abs(parseFloat(el.style.top) - tops[i]) > 0.5;
+      if (fromScroll && moving) el.classList.add('pinned');   // only cards the scroll itself moves follow it exactly
+      if (moving || !fromScroll) el.style.top = tops[i] + 'px';
     });
   }
-  function scrollToMark(id) { const r = markRect(id); if (!r) return; window.scrollTo({ top: Math.max(0, window.scrollY + r.top - 160), behavior: 'smooth' }); }
-  // Keeps at least 320px of page next to the rail.
-  let railW = RAIL_W;
-  const clampRailW = w => Math.round(Math.max(RAIL_MIN, Math.min(w, Math.max(RAIL_MIN, innerWidth - 320))));
-  function applyRailW(w, save) {
-    railW = clampRailW(w); HTML.style.setProperty('--az-rail-w', railW + 'px');
-    const g = $('grip'); g.setAttribute('aria-valuenow', railW); g.setAttribute('aria-valuemin', RAIL_MIN); g.setAttribute('aria-valuemax', clampRailW(1e9));
-    if (save) writeLS(RAILWKEY, railW);
-    scheduleLayout();
+  let rs = 0; const sizeWatch = new ResizeObserver(() => { cancelAnimationFrame(rs); rs = requestAnimationFrame(renderRail); });
+
+  const visible = (t, f) => f === 'all' || (f === 'open' ? !t.resolved : !!t.resolved);
+  let filter = 'open';
+  function renderPanel() {
+    const ids = Object.keys(threads), open = ids.filter(id => !threads[id].resolved).length;
+    $('pcount').textContent = open;
+    $('listBtn').innerHTML = `${I.comment}<span class="n">${open}</span>`;
+    $('listBtn').classList.toggle('sel', panelOpen());
+    const top = id => { const b = anchorBox(id); return b ? b.top : 1e9; };
+    const shown = ids.filter(id => visible(threads[id], filter)).sort((a, b) => top(a) - top(b));
+    shown.forEach(ensureShot);
+    const keep = new Set(shown);
+    for (const [k, el] of [...panelEls]) if (!keep.has(k)) { panelOpen() ? leave(el, panelEls, k) : (el.remove(), panelEls.delete(k)); }
+    let focusEd = null; const fresh = [];
+    shown.forEach(id => {
+      let el = panelEls.get(id);
+      if (!el) { el = makeCard('tcard', id); panelEls.set(id, el); fresh.push(el); }
+      fillCard(el, id, active === id && !threads[id].resolved);
+    });
+    let ref = plist.querySelector('.tcard:not(.leave)');
+    shown.forEach(id => {
+      const el = panelEls.get(id);
+      while (ref && ref.classList.contains('leave')) ref = ref.nextElementSibling;
+      if (el !== ref) plist.insertBefore(el, ref); else ref = ref.nextElementSibling;
+    });
+    const empty = $('pempty');
+    empty.hidden = shown.length > 0;
+    empty.textContent = filter === 'resolved' ? 'No resolved comments.' : 'Select text to comment.\nPress R to draw a box, E to pick a block.';
+    plist.prepend(empty);
+    if (fresh.length) requestAnimationFrame(() => fresh.forEach(el => el.classList.remove('enter')));
+    const pn = $('pnew');
+    if (draft && panelOpen()) {
+      if (pn._d !== draft) {
+        pn._d = draft; pn.hidden = false; pn.innerHTML = `<div class="quote">${esc(draft.label)}</div>`;
+        const f = makeField(null, false); pn.appendChild(f); focusEd = f.querySelector('.ed');
+      }
+    } else if (pn._d) { pn._d = null; pn.hidden = true; pn.innerHTML = ''; }
+    if (focusEd) focusEd.focus({ preventScroll: true });
   }
-  function setFull(on) {
-    ui.classList.toggle('full', on); const b = $('fullBtn'), t = on ? 'Back to side panel' : 'Expand to full window';
-    b.setAttribute('aria-pressed', on); b.title = t; b.setAttribute('aria-label', t);
+  function render() {
+    if (draft && !railFits && !panelOpen()) setPanel(true, true);
+    if (active && !railFits && !panelOpen()) setPanel(true, true);
+    layoutBoxes(); renderPanel(); renderRail(); applyMarkState();
   }
-  function setRail(open) {
-    if (!open) setFull(false);
-    ui.classList.toggle('railopen', open); HTML.classList.toggle('az-railopen', open);
-    scheduleLayout();
+  function refreshAll() { for (const el of railEls.values()) el._h = null; for (const el of panelEls.values()) el._h = null; render(); }
+  function setPanel(open, quiet) {
+    ui.classList.toggle('panel-open', open); HTML.classList.toggle('az-panel', open);
+    if (!quiet) render();
+    prime();
   }
-  function openThread(id, opts) {
-    if (!threads[id]) return;
-    openId = id; setRail(true); renderRail();
-    if (opts && opts.fromCard) scrollToMark(id);
-    const c = cards.get(id);
-    if (c) {
-      c.el.scrollIntoView({ block: 'nearest' });
-      const ta = c.el.querySelector('textarea'); ta && ta.focus({ preventScroll: true });
+  function activate(id, scroll) {
+    active = id;
+    try { history.replaceState(history.state, '', location.pathname + location.search + '#az=' + id); } catch (e) {}
+    render();
+    if (scroll) { const b = boxes[id] || content.querySelector('mark.az-hl[data-tid="' + id + '"]'); if (b) b.scrollIntoView({ block: 'center', behavior: reduced() ? 'auto' : 'smooth' }); }
+  }
+  function deactivate() {
+    active = null;
+    if (/#az=/.test(location.hash)) try { history.replaceState(history.state, '', location.pathname + location.search); } catch (e) {}
+    render();
+  }
+
+  /* ===================== actions ===================== */
+  function act(id, a, b) {
+    const t = threads[id]; if (!t) return;
+    if (a === 'resolve') {
+      if (b.classList.contains('resolving')) return;
+      b.classList.add('resolving');
+      setTimeout(() => {
+        t.resolved = true; persist(); if (active === id) deactivate(); else render();
+        toast('Comment resolved', 'Undo', () => { t.resolved = false; persist(); render(); });
+      }, reduced() ? 0 : 360);
     }
+    if (a === 'reopen') { t.resolved = false; persist(); render(); toast('Comment reopened'); }
+    if (a === 'delete') deleteThread(id);
   }
-  function closeThread() { openId = null; renderRail(); }
   function deleteThread(id) {
     delete threads[id]; delete drafts[id]; deletedIds.add(id); persist(); persistDeleted(); persistDrafts();
-    if (openId === id) openId = null;
-    syncMarks(); renderRail(); toast('Deleted');
-    // Also remove it from -threads.js on disk, or another browser / a cleared localStorage would
-    // resurrect it from the file. The tombstone above already makes this browser correct.
+    if (active === id) active = null;
+    if (boxes[id]) { boxes[id].remove(); delete boxes[id]; }
+    syncMarks(); render(); toast('Deleted');
+    // also remove it from the threads file, or a cleared browser would bring it back
     if (BRIDGE) fetch('/__annot/delete-thread', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base: baseName(), id }) }).catch(() => {});
   }
-  function saveMsg(id) {
-    const c = cards.get(id); const ta = c && c.composer && c.composer.querySelector('textarea'); if (!ta) return;
-    const v = ta.value.trim(); if (!v) return;
-    ta.value = ''; delete drafts[id]; persistDrafts();
-    threads[id].messages.push({ role: 'user', text: v }); persist(); layoutPins(); renderRail();
+  function submit(id, q) {
+    if (!id) {
+      if (!draft) return;
+      id = uid();
+      const d = draft;
+      threads[id] = { type: d.anchor.type, anchor: d.anchor, label: d.label, messages: [] };
+      content.querySelectorAll('mark.az-hl[data-tid="' + DRAFT + '"]').forEach(m => { m.dataset.tid = id; });
+      if (d.box) { boxes[id] = d.box; d.box.dataset.tid = id; }
+      if (d.target) targets[id] = d.target;
+      const el = railEls.get(DRAFT);             // the new-comment card becomes the thread's card: same element, no jump
+      if (el) { railEls.delete(DRAFT); el.dataset.t = id; railEls.set(id, el); el.querySelector('.slot').innerHTML = ''; el._h = null; }
+      draft = null;
+    }
+    const t = threads[id];
+    t.messages.push({ role: 'user', text: q, at: Date.now() });
+    delete drafts[id]; persistDrafts(); persist();
+    root.querySelectorAll('[data-t="' + id + '"] .slot .ed').forEach(ed => { ed.textContent = ''; ed.dispatchEvent(new Event('input')); });
+    active = id;
+    try { history.replaceState(history.state, '', location.pathname + location.search + '#az=' + id); } catch (e) {}
+    render();
     if (BRIDGE) askBridge(id);
-    else toast('Saved — hit Copy for Claude when ready');
+    else toast('Saved. Copy the questions from the Comments panel to ask Claude.', 'Copy', copyQuestions);
+  }
+  function cancelDraft() {
+    const hadText = draft && draft.anchor.type === 'text';
+    if (draft && draft.box) draft.box.remove();
+    draft = null; active = null;
+    if (hadText) syncMarks();
+    render();
+  }
+  function startDraft(d) {
+    if (draft) cancelDraft();
+    active = null; draft = d;
+    if (d.anchor.type === 'text') syncMarks();
+    render(); prime();
   }
 
-  /* ===================== text (always-on adder) ===================== */
-  const adder = $('adder'); let pendingRange = null;
+  /* ===================== selection → one Comment button ===================== */
+  const selbar = $('selbar'); let pendingRange = null, suppressClick = 0;
+  let mode = 'select';
   document.addEventListener('mouseup', e => {
-    if (!HTML.classList.contains('az-on') || tool !== 'select' || fromUI(e)) return;
+    if (mode !== 'select' || fromUI(e)) return;
     setTimeout(() => {
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || !sel.rangeCount) { hideAdder(); return; }
-      const r = sel.getRangeAt(0);
-      if (!content.contains(r.commonAncestorContainer) || host.contains(r.commonAncestorContainer) || sel.toString().trim().length < 2) { hideAdder(); return; }
+      const s = document.getSelection();
+      if (!s || s.isCollapsed || !s.rangeCount) { selbar.classList.remove('show'); return; }
+      const r = s.getRangeAt(0);
+      if (!content.contains(r.commonAncestorContainer) || s.toString().trim().length < 2) { selbar.classList.remove('show'); return; }
       pendingRange = r.cloneRange();
       const rect = r.getBoundingClientRect();
-      adder.classList.add('show');
-      let l = rect.left + rect.width / 2 - adder.offsetWidth / 2; l = Math.max(8, Math.min(l, innerWidth - adder.offsetWidth - 8));
-      const above = rect.top - adder.offsetHeight - 8;
-      adder.style.left = l + 'px'; adder.style.top = (above < 8 ? rect.bottom + 8 : above) + 'px';
-    }, 0);
+      selbar.classList.add('show');
+      const l = Math.max(8, Math.min(rect.left + rect.width / 2 - selbar.offsetWidth / 2, innerWidth - selbar.offsetWidth - 8));
+      const above = rect.top - selbar.offsetHeight - 8;
+      selbar.style.left = l + 'px'; selbar.style.top = Math.max(8, Math.min(innerHeight - selbar.offsetHeight - 8, above < 8 ? rect.bottom + 8 : above)) + 'px';
+    });
   });
-  document.addEventListener('scroll', () => { if (adder.classList.contains('show')) hideAdder(); }, { passive: true, capture: true });
-  function hideAdder() { adder.classList.remove('show'); pendingRange = null; }
-  function makeText(withComment) {
-    if (!pendingRange) return;
-    const anchor = anchorFromRange(pendingRange); if (!anchor.exact) { hideAdder(); return; }
-    const id = uid(); threads[id] = { type: 'text', anchor, label: anchor.exact.slice(0, 80), messages: [] };
-    persist(); window.getSelection().removeAllRanges(); hideAdder(); syncMarks(); renderRail();
-    if (withComment) openThread(id); else toast('Highlighted');
-  }
-  $('addComment').onmousedown = e => e.preventDefault();   // keep the page selection alive
-  $('addHighlight').onmousedown = e => e.preventDefault();
-  $('addComment').onclick = () => makeText(true);
-  $('addHighlight').onclick = () => makeText(false);
-
-  /* ===================== region (drag a box) ===================== */
-  const band = $('band'); let dragging = null;
-  function toContent(x, y) { const cr = content.getBoundingClientRect(); return { x: x - cr.left - content.clientLeft, y: y - cr.top - content.clientTop }; }
-  document.addEventListener('mousedown', e => {
-    if (tool !== 'region' || !HTML.classList.contains('az-on') || e.button !== 0 || fromUI(e)) return;
-    const cr = content.getBoundingClientRect();
-    if (e.clientX < cr.left || e.clientX > cr.right || e.clientY < cr.top || e.clientY > cr.bottom) return;
+  document.addEventListener('selectionchange', () => { const s = document.getSelection(); if (s && s.isCollapsed) selbar.classList.remove('show'); });
+  addEventListener('scroll', () => selbar.classList.remove('show'), { passive: true, capture: true });
+  $('sbComment').addEventListener('mousedown', e => {
     e.preventDefault();
-    const p = toContent(e.clientX, e.clientY); dragging = { x0: p.x, y0: p.y, cx0: e.clientX, cy0: e.clientY };
-    const lr = layer.getBoundingClientRect();
-    Object.assign(band.style, { display: 'block', left: (e.clientX - lr.left) + 'px', top: (e.clientY - lr.top) + 'px', width: '0px', height: '0px' });
+    // the bar hides on press, so the release lands on the page and fires a stray "click outside": ignore it
+    suppressClick = Date.now();
+    if (!pendingRange) return;
+    const anchor = anchorFromRange(pendingRange); if (!anchor.exact) return;
+    const rr = pendingRange.getBoundingClientRect();
+    selbar.classList.remove('show'); document.getSelection().removeAllRanges(); pendingRange = null;
+    startDraft({ anchor, label: anchor.exact.length > 140 ? anchor.exact.slice(0, 138) + '…' : anchor.exact, top: rr.top + scrollY, bottom: rr.bottom + scrollY });
+  });
+
+  /* ===================== draw a box ===================== */
+  const band = $('band'); let drawing = null;
+  document.addEventListener('mousedown', e => {
+    if (mode !== 'region' || e.button !== 0 || fromUI(e)) return;
+    const cr = content.getBoundingClientRect();
+    // inside the doc column, or on anything that belongs to the doc (wide figures stick out past it)
+    const inside = e.clientX >= cr.left && e.clientX <= cr.right && e.clientY >= cr.top && e.clientY <= cr.bottom;
+    if (!inside && !(content.contains(e.target) && e.target !== content)) return;
+    e.preventDefault();
+    drawing ={ x: e.clientX, y: e.clientY, sx: scrollX, sy: scrollY };
+    Object.assign(band.style, { display: 'block', left: e.clientX + 'px', top: e.clientY + 'px', width: '0px', height: '0px' });
   }, true);
-  window.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    const p = toContent(e.clientX, e.clientY), lr = layer.getBoundingClientRect();
-    const l = Math.min(p.x, dragging.x0), t = Math.min(p.y, dragging.y0), w = Math.abs(p.x - dragging.x0), h = Math.abs(p.y - dragging.y0);
-    dragging.box = { l, t, w, h };
-    Object.assign(band.style, { left: (Math.min(e.clientX, dragging.cx0) - lr.left) + 'px', top: (Math.min(e.clientY, dragging.cy0) - lr.top) + 'px', width: w + 'px', height: h + 'px' });
+  addEventListener('mousemove', e => {
+    if (!drawing) return;
+    const x0 = drawing.x - (scrollX - drawing.sx), y0 = drawing.y - (scrollY - drawing.sy);
+    drawing.box = { left: Math.min(x0, e.clientX), top: Math.min(y0, e.clientY), right: Math.max(x0, e.clientX), bottom: Math.max(y0, e.clientY) };
+    Object.assign(band.style, { left: drawing.box.left + 'px', top: drawing.box.top + 'px', width: (drawing.box.right - drawing.box.left) + 'px', height: (drawing.box.bottom - drawing.box.top) + 'px' });
   });
-  window.addEventListener('mouseup', () => {
-    if (!dragging) return; const box = dragging.box; dragging = null; band.style.display = 'none';
-    if (!box || box.w < 12 || box.h < 12) return;
-    const id = uid(), W = content.offsetWidth, H = content.offsetHeight;
-    // vw/vh/pad: the window the box was drawn in; cw/ch: the content size then. The bridge uses
-    // both to re-render the same spot for a picture, even if the page height later shifts a little.
-    const cr = content.getBoundingClientRect(), bl = cr.left + content.clientLeft + box.l, bt = cr.top + content.clientTop + box.t;
-    const pinTo = regionAnchorEls({ left: bl, top: bt, right: bl + box.w, bottom: bt + box.h });
-    threads[id] = { type: 'region', anchor: Object.assign({ type: 'region', x: box.l / W, y: box.t / H, w: box.w / W, h: box.h / H, cw: W, ch: H }, viewSize(), pinTo), label: 'region near ' + nearestHeading(box.t), messages: [] };
-    persist(); layoutPins(); renderRail(); openThread(id); if (!locked) setTool('select');
+  addEventListener('mouseup', () => {
+    if (!drawing) return;
+    const b = drawing.box; drawing = null; band.style.display = 'none';
+    suppressClick = Date.now();
+    if (!b || b.right - b.left < 12 || b.bottom - b.top < 12) return;
+    const cr = content.getBoundingClientRect(), W = content.offsetWidth, H = content.offsetHeight;
+    const bx = cr.left + content.clientLeft, by = cr.top + content.clientTop, w = b.right - b.left, h = b.bottom - b.top;
+    const anchor = Object.assign({ type: 'region', x: (b.left - bx) / W, y: (b.top - by) / H, w: w / W, h: h / H, cw: W, ch: H }, viewSize(), regionAnchorEls(b) || {});
+    // drawn on a sideways-scrolling figure/table: remember which one and how far it was scrolled
+    const cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2, list = scrollers(true);
+    const sc = list.find(s => { const r = s.getBoundingClientRect(); return cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom; });
+    if (sc) {
+      const r = sc.getBoundingClientRect();
+      anchor.scroll = { i: list.indexOf(sc), left: Math.round(sc.scrollLeft), x: Math.round(b.left - r.left - sc.clientLeft + sc.scrollLeft), y: Math.round(b.top - r.top - sc.clientTop + sc.scrollTop), w: Math.round(w), h: Math.round(h) };
+    }
+    const box = document.createElement('az-box');
+    setMode('select');
+    startDraft({ anchor, label: 'Box near “' + nearestHeading(b.top) + '”', box, top: b.top + scrollY, bottom: b.bottom + scrollY });
   });
-  // Window size plus the rail's push (padding-right on <html>), so the bridge can lay the page out
-  // the same way: docs that size things by window width (vw units) wrap differently otherwise.
-  function viewSize() { return { vw: HTML.clientWidth, vh: innerHeight, pad: Math.round(parseFloat(getComputedStyle(HTML).paddingRight) || 0) }; }
-  function nearestHeading(topPx) {
-    const cr = content.getBoundingClientRect(); let best = 'the page';
-    content.querySelectorAll('h1,h2,h3').forEach(h => { if (h.getBoundingClientRect().top - cr.top <= topPx + 20) best = h.textContent; });
-    return best.trim().slice(0, 40);
-  }
 
-  /* ===================== element (hover-outline → click) ===================== */
-  let hoverEl = null;
-  const badgeEl = $('badge');
-  function updateBadge() {
-    if (!hoverEl) { badgeEl.style.display = 'none'; return; }
-    const r = hoverEl.getBoundingClientRect(), txt = hoverEl.textContent.trim().slice(0, 28);
-    badgeEl.textContent = hoverEl.tagName.toLowerCase() + (txt ? ' · ' + txt : '');
-    badgeEl.style.display = 'block'; badgeEl.style.left = Math.max(4, r.left) + 'px'; badgeEl.style.top = (r.top - 22 < 0 ? r.top + 4 : r.top - 22) + 'px';
+  /* ===================== pick a block (↑/↓ to grow or shrink) ===================== */
+  const BLOCKS = 'td,th,tr,table,p,li,ul,ol,dl,h1,h2,h3,h4,h5,blockquote,pre:not(.mermaid),img,figure,[data-annot],.node,.card,.step,.box,.prob';
+  function svgNode(t) {
+    const s = t.closest && t.closest('svg'); if (!s || !content.contains(s)) return null;
+    // Mermaid draws each node as <g class="node">; other diagrams: the smallest group holding a shape and its label
+    let g = t.closest('g.node, g.cluster, g.edgeLabel');
+    if (!g) for (let e = t.closest('g'); e && e !== s && s.contains(e); e = e.parentElement && e.parentElement.closest('g')) {
+      if (e.querySelector('text, foreignObject') && e.querySelector('rect, path, circle, ellipse, polygon')) { g = e; break; }
+    }
+    return g && s.contains(g) ? g : null;
   }
-  function setHover(el) { if (el === hoverEl) return; hoverEl && hoverEl.classList.remove('az-el-hover'); hoverEl = el; hoverEl && hoverEl.classList.add('az-el-hover'); updateBadge(); }
-  content.addEventListener('mousemove', e => {
-    if (tool !== 'element' || !HTML.classList.contains('az-on')) return;
-    if (fromUI(e)) { setHover(null); return; }
-    const el = e.target.closest && e.target.closest(ELIG);
-    setHover(el && content.contains(el) ? el : null);
-  });
-  content.addEventListener('mouseleave', () => { if (tool === 'element') setHover(null); });
+  function pickChain(t) {
+    const chain = [], n = svgNode(t);
+    if (n) chain.push(n);
+    for (let e = n ? n.closest('svg') : t; e && e !== content; e = e.parentElement) {
+      if (e.nodeType === 1 && !(e instanceof SVGElement && e.tagName.toLowerCase() !== 'svg') && e.matches && e.matches(BLOCKS + ',svg') && !chain.includes(e)) chain.push(e);
+    }
+    return chain.filter(e => content.contains(e) && !(e.tagName.toLowerCase() === 'svg' && e.closest('figure')));
+  }
+  function blockName(e) {
+    if (e instanceof SVGElement) return e.tagName.toLowerCase() === 'svg' ? 'Diagram' : 'Node';
+    const tag = e.tagName.toLowerCase();
+    if (e.matches('figure')) return e.querySelector('svg,img,canvas') ? 'Diagram' : 'Figure';
+    return { td: 'Cell', th: 'Header cell', tr: 'Row', table: 'Table', p: 'Paragraph', li: 'List item', ul: 'List', ol: 'List', dl: 'List', h1: 'Heading', h2: 'Heading', h3: 'Heading', h4: 'Heading', h5: 'Heading', blockquote: 'Quote', pre: 'Code', img: 'Image' }[tag] || 'Block';
+  }
+  const pickEl = $('pick'); let pick = { chain: [], level: 0 };
+  function showPick() {
+    const el = pick.chain[pick.level];
+    if (mode !== 'element' || !el) { pickEl.classList.remove('show'); return; }
+    let r = el.getBoundingClientRect();
+    const sc = scrollerOf(el);
+    if (sc) { const c = sc.getBoundingClientRect(); r = { left: Math.max(r.left, c.left), right: Math.min(r.right, c.right), top: r.top, bottom: r.bottom }; }
+    Object.assign(pickEl.style, { left: (r.left - 3) + 'px', top: (r.top - 3) + 'px', width: (r.right - r.left + 6) + 'px', height: (r.bottom - r.top + 6) + 'px' });
+    const more = pick.level < pick.chain.length - 1, less = pick.level > 0;
+    pickEl.firstChild.innerHTML = blockName(el) + (more || less ? `<i>${more ? '↑ ' + blockName(pick.chain[pick.level + 1]).toLowerCase() : ''}${more && less ? '  ' : ''}${less ? '↓ smaller' : ''}</i>` : '');
+    pickEl.classList.add('show');
+  }
+  document.addEventListener('mousemove', e => {
+    if (mode !== 'element') return;
+    const chain = !fromUI(e) && content.contains(e.target) ? pickChain(e.target) : [];
+    if (chain[0] !== pick.chain[0]) pick = { chain, level: 0 }; else pick.chain = chain;
+    showPick();
+  }, { passive: true });
+  addEventListener('scroll', () => { if (mode === 'element') showPick(); }, { passive: true, capture: true });
   content.addEventListener('click', e => {
-    if (tool !== 'element' || !HTML.classList.contains('az-on') || fromUI(e)) return;
-    const el = e.target.closest && e.target.closest(ELIG); if (!el || !content.contains(el)) return;
-    e.preventDefault(); e.stopPropagation(); setHover(null);
-    const id = uid();
-    threads[id] = { type: 'element', anchor: { type: 'element', sel: selectorFor(el), tag: el.tagName.toLowerCase(), text: el.textContent.trim().slice(0, 120) }, label: (el.textContent || el.tagName).trim().replace(/\s+/g, ' ').slice(0, 80), messages: [] };
-    persist(); syncMarks(); renderRail(); openThread(id); if (!locked) setTool('select');
+    if (mode !== 'element' || fromUI(e)) return;
+    const chain = pickChain(e.target); if (!chain.length) return;
+    const el = chain[0] === pick.chain[0] ? chain[Math.min(pick.level, chain.length - 1)] : chain[0];
+    e.preventDefault(); e.stopPropagation();
+    suppressClick = Date.now();
+    const r = el.getBoundingClientRect(), txt = normWS(el.textContent || '').trim(), name = blockName(el);
+    setMode('select');
+    startDraft({ anchor: { type: 'element', sel: selectorFor(el), tag: el.tagName.toLowerCase(), text: txt.slice(0, 120) },
+      label: (/^(Table|Diagram|List|Figure|Image)$/.test(name) ? name + ': ' : '') + (txt.slice(0, 110) || name), target: el, box: document.createElement('az-box'), top: r.top + scrollY, bottom: r.bottom + scrollY });
   }, true);
 
-  /* reopen a mark's thread (select mode) — but not when the click ended a text drag */
-  content.addEventListener('click', e => {
-    if (tool !== 'select' || fromUI(e)) return;
-    const s = window.getSelection(); if (s && !s.isCollapsed && s.toString().trim()) return;
-    const m = e.target.closest && e.target.closest('mark.az-hl'); if (m) openThread(m.dataset.tid);
+  /* ===================== clicks, hover and keys on the page ===================== */
+  content.addEventListener('mouseover', e => {
+    const m = e.target.closest && e.target.closest('mark.az-hl'); if (!m || active) return;
+    const t = threads[m.dataset.tid]; if (t && !t.resolved) applyMarkState(m.dataset.tid);
   });
-
-  /* ===================== tools + shortcuts ===================== */
-  function setTool(t) {
-    tool = t; hideAdder();
-    root.querySelectorAll('.tool[data-tool]').forEach(b => b.classList.toggle('active', b.dataset.tool === t));
-    HTML.classList.toggle('az-region-mode', t === 'region');
-    HTML.classList.toggle('az-element-mode', t === 'element');
-    if (t !== 'element') setHover(null);
-  }
-  root.querySelectorAll('.tool[data-tool]').forEach(b => b.onclick = () => { setAnnot(true); setTool(b.dataset.tool); });
-  $('lock').onclick = () => { locked = !locked; $('lock').classList.toggle('lockon', locked); toast(locked ? 'Tool lock ON — place many' : 'Tool lock off'); };
-  function setAnnot(on) { HTML.classList.toggle('az-on', on); ui.classList.toggle('on', on); if (on) prime(); if (!on) { setTool('select'); hideAdder(); closeThread(); hideMenu(); } }
-  $('master').onclick = () => { const on = !HTML.classList.contains('az-on'); setAnnot(on); if (on) { setRail(true); renderRail(); toast('Select text · R region · E element'); } };
+  content.addEventListener('mouseout', e => { const m = e.target.closest && e.target.closest('mark.az-hl'); if (m && !active) applyMarkState(null); });
+  let hoverBox = null;
+  document.addEventListener('mousemove', e => {
+    if (mode !== 'select' || drawing || fromUI(e)) return;
+    const id = boxAt(e.clientX, e.clientY);
+    if (id === hoverBox) return;
+    hoverBox = id; HTML.style.cursor = id ? 'pointer' : '';
+    if (!active) applyMarkState(id);
+  }, { passive: true });
+  document.addEventListener('click', e => {
+    if (Date.now() - suppressClick < 400 || fromUI(e) || mode !== 'select') return;
+    const s = document.getSelection(); if (s && !s.isCollapsed && s.toString().trim()) return;
+    const m = e.target.closest && e.target.closest('mark.az-hl');
+    const id = m ? m.dataset.tid : boxAt(e.clientX, e.clientY);
+    if (id && id !== DRAFT && threads[id] && !threads[id].resolved) { draft = null; syncMarks(); activate(id, false); return; }
+    if (draft) cancelDraft(); else if (active) deactivate();
+  });
   document.addEventListener('keydown', e => {
     const t = e.composedPath()[0];
+    if (e.key === 'Escape' && closeMenus()) return;
     if (t && (/^(input|textarea|select)$/i.test(t.tagName) || t.isContentEditable)) return;
-    if (e.metaKey || e.ctrlKey || e.altKey) return;   // leave ⌘E, ⌘R, ⌘V etc. to the browser
-    if (e.key === 'Escape') { if (menuOpen()) hideMenu(); else if (openId) closeThread(); else if (ui.classList.contains('full')) setFull(false); else if (tool !== 'select') setTool('select'); hideAdder(); return; }
-    if (!HTML.classList.contains('az-on')) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;   // leave ⌘E, ⌘R, ⌘V to the browser
+    if (mode === 'element' && pick.chain.length && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      if (e.key === 'ArrowUp' && pick.level < pick.chain.length - 1) pick.level++;
+      if (e.key === 'ArrowDown' && pick.level > 0) pick.level--;
+      e.preventDefault(); showPick(); return;
+    }
     const k = e.key.toLowerCase();
-    if ((k === 'r' || k === 'e') && ui.classList.contains('full')) setFull(false);   // drawing needs the page
-    if (k === 'v') setTool('select');
-    else if (k === 'r') setTool('region');
-    else if (k === 'e') setTool('element');
+    if (k === 'escape') { if (mode !== 'select') setMode('select'); else if (draft) cancelDraft(); else if (active) deactivate(); else if (panelOpen()) setPanel(false); return; }
+    if (k === 'v') setMode('select'); else if (k === 'r') setMode('region'); else if (k === 'e') setMode('element');
   });
 
-  /* rail open/close + filters + copy */
-  $('offBtn').onclick = () => setAnnot(false);
-  $('dockThreads').onclick = () => { setRail(!ui.classList.contains('railopen')); renderRail(); };
-  $('closeRail').onclick = () => setRail(false);
-  $('fullBtn').onclick = () => setFull(!ui.classList.contains('full'));
-  {
-    const grip = $('grip'), rail = $('rail'); let raf = 0;
-    grip.addEventListener('pointerdown', e => {
-      if (e.button !== 0) return; e.preventDefault(); grip.setPointerCapture(e.pointerId); rail.classList.add('sizing');
-      HTML.style.setProperty('cursor', 'col-resize', 'important'); HTML.style.setProperty('user-select', 'none', 'important');
-      const move = ev => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => applyRailW(innerWidth - ev.clientX, false)); };
-      const up = () => {
-        cancelAnimationFrame(raf); grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); grip.removeEventListener('pointercancel', up);
-        rail.classList.remove('sizing'); HTML.style.removeProperty('cursor'); HTML.style.removeProperty('user-select'); writeLS(RAILWKEY, railW);
-      };
-      grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up); grip.addEventListener('pointercancel', up);
-    });
-    grip.addEventListener('dblclick', () => applyRailW(RAIL_W, true));
-    grip.addEventListener('keydown', e => {
-      const d = e.key === 'ArrowLeft' ? 24 : e.key === 'ArrowRight' ? -24 : 0;
-      if (d) { e.preventDefault(); e.stopPropagation(); applyRailW(railW + d, true); }
-    });
-    applyRailW(Number(readLS(RAILWKEY, RAIL_W)) || RAIL_W, false);
-    window.addEventListener('resize', () => applyRailW(Number(readLS(RAILWKEY, RAIL_W)) || RAIL_W, false));
+  /* ===================== toolbar, menus, panel ===================== */
+  const MODES = [
+    { id: 'select', label: 'Select text', sub: 'Comment on words', icon: I.cursor, key: 'V' },
+    { id: 'region', label: 'Draw a box', sub: 'Over a diagram or anything', icon: I.box, key: 'R' },
+    { id: 'element', label: 'Pick a block', sub: 'A node, cell or table · ↑ for bigger', icon: I.block, key: 'E' },
+  ];
+  function setMode(m) {
+    mode = m;
+    HTML.classList.toggle('az-mode-region', m === 'region');
+    if (m !== 'element') { pickEl.classList.remove('show'); pick = { chain: [], level: 0 }; }
+    const d = MODES.find(x => x.id === m);
+    $('modeBtn').innerHTML = `${d.icon}${I.caret}`; $('modeBtn').title = `${d.label} (${d.key})`; $('modeBtn').setAttribute('aria-label', 'Mode: ' + d.label);
+    if (m !== 'select') { selbar.classList.remove('show'); toast(m === 'region' ? 'Drag a box over anything' : 'Click a block · ↑ ↓ to pick bigger or smaller', 'Cancel', () => setMode('select')); }
   }
-  root.querySelectorAll('.chip').forEach(c => c.onclick = () => { filter = c.dataset.filter; root.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === c)); renderRail(); });
-  $('copyBtn').onclick = () => {
-    const batch = Object.entries(threads).filter(([id, t]) => t.messages.some(m => m.role === 'user'))
-      .map(([id, t]) => ({ id, label: t.label, anchor: t.anchor, questions: t.messages.filter(m => m.role === 'user').map(m => m.text) }));
-    if (!batch.length) { toast('No questions yet'); return; }
-    const threadsFile = threadsFileName();
-    const fullPath = location.protocol === 'file:'
-      ? decodeURIComponent(location.pathname).replace(/[^/]+$/, threadsFile)
-      : threadsFile + '  (sibling of this HTML file; page served from ' + location.href + ')';
+  let floating = null, onClose = null;
+  function openMenu(btn, items, closed) {
+    closeMenus();
+    const m = document.createElement('div'); m.className = 'menu'; m.setAttribute('role', 'menu');
+    if (!items.some(it => it && it.icon)) m.classList.add('noicons');
+    m.innerHTML = items.map((it, i) => !it ? '<hr>' : it.head ? `<h5>${esc(it.head)}</h5>` : `<button role="menuitem" data-i="${i}" class="${it.sel ? 'sel' : ''} ${it.danger ? 'danger' : ''}" ${it.disabled ? 'disabled' : ''}><span class="ic">${it.icon || ''}</span><span class="tx">${esc(it.label)}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span><kbd>${it.key || ''}</kbd><span class="chk">${I.check}</span></button>`).join('');
+    ui.appendChild(m);
+    const r = btn.getBoundingClientRect();
+    const left = Math.max(8, Math.min(innerWidth - m.offsetWidth - 8, r.right - m.offsetWidth));
+    const below = r.bottom + 6 + m.offsetHeight < innerHeight;
+    Object.assign(m.style, { left: left + 'px', top: (below ? r.bottom + 6 : Math.max(8, r.top - 6 - m.offsetHeight)) + 'px', transformOrigin: below ? 'top right' : 'bottom right' });
+    m.querySelectorAll('button').forEach(b => b.onclick = e => { e.stopPropagation(); const it = items[b.dataset.i]; closeMenus(); it.run && it.run(); });
+    btn.setAttribute('aria-expanded', 'true');
+    floating = { m, btn }; onClose = closed || null;
+  }
+  function closeMenus() {
+    if (!floating) return false;
+    floating.m.remove(); floating.btn.setAttribute('aria-expanded', 'false'); floating = null;
+    if (onClose) { const f = onClose; onClose = null; f(); }
+    return true;
+  }
+  document.addEventListener('mousedown', e => { if (floating && !e.composedPath().includes(floating.m) && !e.composedPath().includes(floating.btn)) closeMenus(); }, true);
+  $('modeBtn').addEventListener('click', e => { e.stopPropagation(); if (floating && floating.btn === $('modeBtn')) { closeMenus(); return; } openMenu($('modeBtn'), MODES.map(x => ({ label: x.label, sub: x.sub, icon: x.icon, key: x.key, sel: x.id === mode, run: () => setMode(x.id) }))); });
+  $('listBtn').addEventListener('click', () => setPanel(!panelOpen()));
+  $('pclose').addEventListener('click', () => setPanel(false));
+  $('filterBtn').addEventListener('click', e => { e.stopPropagation(); openMenu($('filterBtn'), ['open', 'resolved', 'all'].map(f => ({ label: f[0].toUpperCase() + f.slice(1), sel: filter === f, run: () => { filter = f; render(); } }))); });
+  $('pmoreBtn').addEventListener('click', e => {
+    e.stopPropagation();
+    openMenu($('pmoreBtn'), [
+      { label: 'Copy questions', sub: BRIDGE ? 'For a chat, as a paste-ready batch' : 'Paste into any Claude chat to get answers', icon: I.copy, run: copyQuestions },
+      null,
+      { label: BRIDGE ? 'Answers: automatic' : 'Answers: copy and paste', sub: BRIDGE ? 'Through the local helper · ' + modelLabel() : 'Open the doc through its launcher for automatic answers', disabled: true },
+    ]);
+  });
+
+  /* ===================== copy questions (works without the bridge) ===================== */
+  function baseName() { return decodeURIComponent(location.pathname.split('/').pop() || '').replace(/\.html?$/i, '') || 'page'; }
+  function threadsFileName() { return baseName() + '-threads.js'; }
+  function copyQuestions() {
+    const batch = Object.entries(threads).filter(([, t]) => !t.resolved && pendingQuestions(t).length)
+      .map(([id, t]) => ({ id, label: t.label, anchor: t.anchor, questions: pendingQuestions(t) }));
+    if (!batch.length) { toast('No unanswered questions'); return; }
+    const file = threadsFileName();
+    const fullPath = location.protocol === 'file:' ? decodeURIComponent(location.pathname).replace(/[^/]+$/, file) : file + '  (sibling of this HTML file; page served from ' + location.href + ')';
     const text =
 `You are answering a reader's questions that are pinned to a local HTML document. Write your
 answers into this file (create it if it does not exist):
@@ -1023,7 +1228,7 @@ Merge the entries below into it, keyed by "id". Rules:
   • If the file is new, write:  window.${CFG.threadsVar} = { ...these entries... };
   • This is a plain file edit. Do NOT commit, push, or touch git.
 
-When done, the reader reloads the page: pins turn green and answers appear inline.
+When done, the reader reloads the page and the answers appear in the comment cards.
 
 Shape to write per id:
   "<id>": { "label":"…", "anchor":{…}, "messages":[
@@ -1032,88 +1237,62 @@ Shape to write per id:
 Questions to answer (${batch.length}):
 ${JSON.stringify(batch, null, 2)}`;
     (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject())
-      .then(() => toast('Copied ' + batch.length + ' thread(s)'), () => {
+      .then(() => toast('Copied ' + batch.length + ' question' + (batch.length > 1 ? 's' : '') + '. Paste into any Claude chat.'), () => {
         const ta = document.createElement('textarea'); ta.className = 'pastebox'; ta.value = text; ui.appendChild(ta); ta.select();
-        ta.addEventListener('blur', () => ta.remove()); toast('Select-all + copy, then click away');
+        ta.addEventListener('blur', () => ta.remove()); toast('Select all and copy, then click away');
       });
-  };
-
-  /* ===================== model picker ===================== */
-  const menu = $('menu');
-  const menuOpen = () => menu.classList.contains('show');
-  function hideMenu() { menu.classList.remove('show'); }
-  function validChoice(c) {
-    if (!MODELS || !c) return false;
-    const b = MODELS[c.backend]; if (!b || !b.available) return false;
-    return b.models.some(m => m.id === c.model);
   }
+
+  /* ===================== model choice ===================== */
+  function modelInfo(c) { const b = MODELS && c && MODELS[c.backend]; return b && b.models.find(m => m.id === c.model); }
+  function validChoice(c) { if (!MODELS || !c) return false; const b = MODELS[c.backend]; return !!(b && b.available && b.models.some(m => m.id === c.model)); }
   function defaultChoice() {
     if (!MODELS) return null;
     if (MODELS.claude && MODELS.claude.available) return { backend: 'claude', model: MODELS.claude.default };
     if (MODELS.codex && MODELS.codex.available) return { backend: 'codex', model: MODELS.codex.default, effort: MODELS.codex.defaultEffort };
     return null;
   }
-  function modelInfo(c) { const b = MODELS && c && MODELS[c.backend]; return b && b.models.find(m => m.id === c.model); }
-  function choiceLabel(c) {
-    c = c || choice; const m = modelInfo(c); if (!m) return 'Claude';
-    return (c.backend === 'codex' ? 'Codex · ' : 'Claude · ') + m.label + (c.backend === 'codex' && c.effort ? ' (' + c.effort + ')' : '');
-  }
-  function paintModelBtn() {
-    const m = modelInfo(choice);
-    $('modelName').textContent = m ? m.label + (choice.backend === 'codex' && choice.effort ? ' · ' + choice.effort : '') : 'Model';
-    $('modelBtn').classList.toggle('codex', !!choice && choice.backend === 'codex');
-  }
-  function renderMenu() {
-    let h = '';
+  function modelLabel(c) { c = c || choice; const m = modelInfo(c); if (!m) return 'Claude'; return (c.backend === 'codex' ? 'Codex · ' : 'Claude · ') + m.label + (c.backend === 'codex' && c.effort ? ' (' + c.effort + ')' : ''); }
+  function modelShort() { const m = modelInfo(choice); return m ? m.label + (choice.backend === 'codex' && choice.effort ? ' · ' + choice.effort : '') : 'Model'; }
+  function openModelMenu(btn) {
+    if (!MODELS) return;
+    const items = [];
     for (const be of ['claude', 'codex']) {
       const b = MODELS[be]; if (!b) continue;
-      h += '<h5>' + (be === 'claude' ? 'Claude' : 'Codex') + (b.available ? '' : ' <small>' + esc(b.reason || 'unavailable') + '</small>') + '</h5>';
-      b.models.forEach(m => {
-        const on = choice && choice.backend === be && choice.model === m.id;
-        h += '<button class="opt" data-be="' + be + '" data-m="' + esc(m.id) + '"' + (b.available ? '' : ' disabled') + '><span class="ck">' + (on ? '✓' : '') + '</span>' + esc(m.label) + '</button>';
-      });
-      if (be === 'codex' && choice && choice.backend === 'codex') {
-        const m = modelInfo(choice);
-        if (m && m.efforts && m.efforts.length) {
-          h += '<h5>Effort</h5><div class="efforts">' + m.efforts.map(e => '<button class="chip' + (choice.effort === e ? ' on' : '') + '" data-effort="' + esc(e) + '">' + esc(e) + '</button>').join('') + '</div>';
-        }
+      items.push({ head: (be === 'claude' ? 'Claude' : 'Codex') + (b.available ? '' : ' · ' + (b.reason || 'unavailable')) });
+      b.models.forEach(m => items.push({ label: m.label, sel: !!choice && choice.backend === be && choice.model === m.id, disabled: !b.available, run: () => {
+        choice = { backend: be, model: m.id };
+        if (be === 'codex') choice.effort = (m.efforts || []).includes(MODELS.codex.defaultEffort) ? MODELS.codex.defaultEffort : (m.efforts || [])[0];
+        writeLS(CHOICEKEY, choice); primedFor = null; prime();
+        root.querySelectorAll('.model').forEach(x => x.innerHTML = `${esc(modelShort())} ${I.caret}`);
+      } }));
+      const cur = be === 'codex' && choice && choice.backend === 'codex' && modelInfo(choice);
+      if (cur && cur.efforts && cur.efforts.length) {
+        items.push({ head: 'Effort' });
+        cur.efforts.forEach(ef => items.push({ label: ef, sel: choice.effort === ef, run: () => { choice.effort = ef; writeLS(CHOICEKEY, choice); root.querySelectorAll('.model').forEach(x => x.innerHTML = `${esc(modelShort())} ${I.caret}`); } }));
       }
     }
-    menu.innerHTML = h;
-    menu.querySelectorAll('.opt').forEach(o => o.onclick = () => {
-      const be = o.dataset.be, id = o.dataset.m;
-      const m = MODELS[be].models.find(x => x.id === id);
-      choice = { backend: be, model: id };
-      if (be === 'codex') choice.effort = (m.efforts || []).includes(MODELS.codex.defaultEffort) ? MODELS.codex.defaultEffort : (m.efforts || [])[0];
-      writeLS(CHOICEKEY, choice); paintModelBtn(); renderMenu(); prime();
-      toast('Answers now from ' + choiceLabel());
-    });
-    menu.querySelectorAll('[data-effort]').forEach(o => o.onclick = () => { choice.effort = o.dataset.effort; writeLS(CHOICEKEY, choice); paintModelBtn(); renderMenu(); });
+    openMenu(btn, items);
   }
-  $('modelBtn').onclick = e => { e.stopPropagation(); if (menuOpen()) hideMenu(); else { renderMenu(); menu.classList.add('show'); } };
-  document.addEventListener('mousedown', e => { if (menuOpen() && !e.composedPath().includes(menu) && !e.composedPath().includes($('modelBtn'))) hideMenu(); }, true);
 
   /* ===================== auto-answer bridge (optional) ===================== */
-  function baseName() { return decodeURIComponent(location.pathname.split('/').pop() || '').replace(/\.html?$/i, '') || 'page'; }
-  function threadsFileName() { return baseName() + '-threads.js'; }
-  async function detectBridge() {
-    if (location.protocol === 'file:') return;
-    try {
-      const r = await fetch('/__annot/ping', { cache: 'no-store' });
-      if (r.ok && (await r.json()).ok) BRIDGE = true;
-    } catch (e) { return; }
-    if (!BRIDGE) return;
-    ui.classList.add('live');
-    renderRail();   // region cards can now fetch their pictures
-    try { const r = await fetch('/__annot/models', { cache: 'no-store' }); if (r.ok) MODELS = await r.json(); } catch (e) {}
-    if (MODELS && !validChoice(choice)) { choice = defaultChoice(); if (choice) writeLS(CHOICEKEY, choice); }
-    paintModelBtn();
-    if (HTML.classList.contains('az-on')) prime();
+  function shotUrl(id) { return '/.annot-snaps/' + encodeURIComponent(baseName()) + '/' + id + '.png'; }
+  function ensureShot(id) {
+    const t = threads[id];
+    if (!BRIDGE || !t || t.type !== 'region' || shots[id]) return;
+    shots[id] = 'probe';
+    const done = v => { shots[id] = v; const el = panelEls.get(id); if (el) el._h = null; renderPanel(); };
+    const img = new Image();
+    img.onload = () => done('ok');
+    img.onerror = () => {
+      done('wait');
+      fetch('/__annot/snap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base: baseName(), id, anchor: t.anchor, view: viewSize() }) })
+        .then(r => r.json()).then(j => done(j && j.ok ? 'ok' : 'none'), () => done('none'));
+    };
+    img.src = shotUrl(id);
   }
-  // Warm the doc's base session in the background when Annotate is turned on (not on every page
-  // view — reading a doc shouldn't spend a model call), so the first question doesn't wait for it.
   let primedFor = null;
-  function prime() {
+  function prime() {   // warm the doc's session when the reader starts commenting, not on every page view
     if (!BRIDGE || !choice) return;
     const key = choice.backend + '|' + choice.model; if (primedFor === key) return; primedFor = key;
     fetch('/__annot/prime', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base: baseName(), backend: choice.backend, model: choice.model, effort: choice.effort }) }).catch(() => {});
@@ -1121,15 +1300,16 @@ ${JSON.stringify(batch, null, 2)}`;
   async function askBridge(id) {
     const t = threads[id]; if (!t || answering[id]) return;
     const questions = pendingQuestions(t); if (!questions.length) return;
-    const by = choiceLabel();
-    answering[id] = { text: '', by }; renderRail();
-    let final = null;
+    const by = modelLabel();
+    answering[id] = { text: '', by }; render();
+    let final = null, raf = 0;
+    const paint = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; render(); }); };
     try {
       const res = await fetch('/__annot/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ base: baseName(), id, label: t.label, anchor: t.anchor, view: viewSize(), questions, backend: choice && choice.backend, model: choice && choice.model, effort: choice && choice.effort, by, stream: true }) });
       if (!res.ok || !res.body) throw new Error('bridge returned ' + res.status);
       const reader = res.body.getReader(), dec = new TextDecoder();
-      let buf = '', raf = 0;
+      let buf = '';
       for (;;) {
         const { value, done } = await reader.read(); if (done) break;
         buf += dec.decode(value, { stream: true });
@@ -1137,34 +1317,53 @@ ${JSON.stringify(batch, null, 2)}`;
         while ((nl = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1); if (!line) continue;
           let ev; try { ev = JSON.parse(line); } catch (e) { continue; }
-          if (ev.t === 'delta' && answering[id]) { answering[id].text += ev.text; if (!raf) raf = requestAnimationFrame(() => { raf = 0; updateStream(id); }); }
-          else if (ev.t === 'reset' && answering[id]) { answering[id].text = ''; }
+          if (ev.t === 'delta' && answering[id]) { answering[id].text += ev.text; paint(); }
+          else if (ev.t === 'reset' && answering[id]) { answering[id].text = ''; paint(); }
           else if (ev.t === 'done') final = ev;
         }
       }
       if (!final || !final.ok) throw new Error((final && final.error) || 'no answer');
       if (threads[id] && final.entry) { mergeThread(id, final.entry); persist(); }
-      toast(final.warning ? '⚠ ' + final.warning : 'Answered');
-    } catch (e) { toast('Answer failed: ' + String(e.message || e).slice(0, 140)); }
+      if (final.warning) toast(final.warning);
+    } catch (e) {
+      toast('Answer failed: ' + String(e.message || e).slice(0, 100), 'Retry', () => askBridge(id));
+    }
     delete answering[id];
-    if (!threads[id]) { renderRail(); return; }
-    syncMarks(); renderRail();
-    if (final && final.ok && pendingQuestions(threads[id]).length) askBridge(id);   // follow-up typed while this one was answering
+    render();
+    if (final && final.ok && threads[id] && pendingQuestions(threads[id]).length) askBridge(id);   // a follow-up typed meanwhile
+  }
+  async function detectBridge() {
+    if (location.protocol === 'file:') return;
+    try { const r = await fetch('/__annot/ping', { cache: 'no-store' }); BRIDGE = r.ok && !!(await r.json()).ok; } catch (e) { return; }
+    if (!BRIDGE) return;
+    try { const r = await fetch('/__annot/models', { cache: 'no-store' }); if (r.ok) MODELS = await r.json(); } catch (e) {}
+    if (MODELS && !validChoice(choice)) { choice = defaultChoice(); if (choice) writeLS(CHOICEKEY, choice); }
   }
 
   /* ===================== boot ===================== */
-  window.addEventListener('resize', scheduleLayout);
-  if (window.ResizeObserver) new ResizeObserver(scheduleLayout).observe(content);
-  window.addEventListener('load', scheduleLayout);
-  document.fonts && document.fonts.ready && document.fonts.ready.then(scheduleLayout);
-  function boot() {
-    syncMarks(); renderRail();
-    detectBridge().then(() => {
-      if (!BRIDGE && location.protocol === 'file:') {
-        const f = root.querySelector('.rail footer');
-        if (f && !f.querySelector('.cap')) { const n = document.createElement('div'); n.className = 'cap'; n.textContent = 'Copy-paste mode. For automatic answers, open this doc via its launcher instead of the file directly.'; f.appendChild(n); }
-      }
-    });
+  let relayout = 0;
+  function scheduleLayout(full) {
+    cancelAnimationFrame(relayout);
+    relayout = requestAnimationFrame(() => { if (full) measureRoom(); render(); });
+  }
+  addEventListener('resize', () => scheduleLayout(true));
+  addEventListener('scroll', () => { requestAnimationFrame(() => pin(true)); }, { passive: true });
+  if (window.ResizeObserver) new ResizeObserver(() => scheduleLayout(false)).observe(content);
+  // diagrams (Mermaid etc.) render after load: re-anchor when an <svg> appears in the content
+  new MutationObserver(ms => {
+    if (ms.some(m => [...m.addedNodes].some(n => n.nodeType === 1 && (n.tagName.toLowerCase() === 'svg' || (n.querySelector && n.querySelector('svg')))))) { setTimeout(() => { syncMarks(); scheduleLayout(true); }, 60); }
+  }).observe(content, { childList: true, subtree: true });
+  document.fonts && document.fonts.ready && document.fonts.ready.then(() => scheduleLayout(true));
+  addEventListener('load', () => scheduleLayout(true));
+
+  async function boot() {
+    setMode('select');
+    measureRoom(); syncMarks(); render();
+    await detectBridge();
+    refreshAll();
+    const m = location.hash.match(/#az=(\w+)/);
+    if (m && threads[m[1]]) activate(m[1], true);
+    if (!BRIDGE && location.protocol === 'file:' && !readLS('annot::seen-copy', false)) { writeLS('annot::seen-copy', true); toast('Copy-paste mode: open this doc through its launcher for automatic answers'); }
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 })();

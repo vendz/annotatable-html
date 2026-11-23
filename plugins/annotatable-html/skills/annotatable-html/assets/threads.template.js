@@ -1,16 +1,16 @@
 // Answers store for an annotate.js-enabled page. Rename to "<htmlbasename>-threads.js".
-// Claude owns this file. The user adds questions in the page, copies the exported batch
-// (the "📋 Copy questions for Claude" button embeds full instructions), and Claude appends
+// The bridge writes this file; without the bridge, the reader copies their questions from the
+// Comments panel ("⋯" → Copy questions, full instructions included) and Claude appends
 // {role:"user"} + {role:"claude"} messages here, keyed by the thread id. Answers may use
-// markdown (bold, lists, `code`, code fences) — it renders in the sidebar.
-// Reload the page to see answers land on the highlighted text / region / element (pins turn green).
+// markdown (bold, lists, tables, `code`, code fences, math) — it renders in the comment cards.
+// Reload the page to see answers appear beside the highlighted text, box or block.
 //
 //   window.ANNOTATE_THREADS = {
 //     "<id>": {
 //       label: "<short human label — copy verbatim from the batch>",
-//       anchor: { type:"text",    exact, prefix }      // text highlight (re-located by exact phrase)
-//             |  { type:"region",  x, y, w, h }         // drawn box; fractions 0..1 of the content box
-//             |  { type:"element", sel, tag, text },    // clicked element (re-located by selector, then tag+text)
+//       anchor: { type:"text",    exact, prefix, suffix }   // highlighted words (re-located by phrase + surroundings)
+//             |  { type:"region",  x, y, w, h, ... }        // drawn box; fractions 0..1 of the content box (+ optional pinning / scroll)
+//             |  { type:"element", sel, tag, text },        // picked block or diagram node (selector, then tag + text)
 //       messages: [ {role:"user",text:"…"}, {role:"claude",text:"…"} ]  // append; never replace
 //     }
 //   };

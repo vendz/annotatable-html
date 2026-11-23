@@ -484,7 +484,9 @@ async function takeSnap(base, id, anchor, view, out) {
     await send('Page.enable', {}, s);
     await send('Emulation.setDeviceMetricsOverride', { width: vw, height: vh, deviceScaleFactor: 1, mobile: false }, s);
     const loaded = new Promise(res => { onEvent = m => { if (m.method === 'Page.loadEventFired' && m.sessionId === s) res(); }; });
-    const nav = await send('Page.navigate', { url: `${SELF_ORIGIN}/${encodeURIComponent(base)}.html?az-snap=1` }, s);
+    // A box drawn on a sideways-scrolling figure/table: open the page scrolled the same way (pages that don't know the param ignore it).
+    const sc = anchor && anchor.scroll && Number.isInteger(+anchor.scroll.i) && Number.isFinite(+anchor.scroll.left) ? `&scroll=${+anchor.scroll.i}:${Math.round(+anchor.scroll.left)}` : '';
+    const nav = await send('Page.navigate', { url: `${SELF_ORIGIN}/${encodeURIComponent(base)}.html?az-snap=1${sc}` }, s);
     if (nav.errorText) throw new Error('page failed to load: ' + nav.errorText);
     await Promise.race([fail, loaded]);
     // Push the page in like the rail did.
